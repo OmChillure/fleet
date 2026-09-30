@@ -15,7 +15,7 @@ use crate::models::{IntegrationConnection, IntegrationOAuthApp};
 use crate::pool::map_query_err;
 
 const COLS: &str = r#"
-    id, workspace_id, provider, status, account_label, config, credentials,
+    id, workspace_id, provider, status, account_label, display_name, config, credentials,
     connected_by, last_error, connected_at, updated_at, version
 "#;
 
@@ -25,6 +25,8 @@ pub struct UpsertConnection {
     pub workspace_id: Uuid,
     pub provider: String,
     pub account_label: Option<String>,
+    /// Empty keeps the legacy one-row-per-provider reconnect.
+    pub display_name: Option<String>,
     pub config: Value,
     pub credentials: Value,
     pub connected_by: Option<Uuid>,
@@ -44,7 +46,7 @@ pub async fn list_for_workspace(
         SELECT {COLS}
         FROM integration_connections
         WHERE workspace_id = $1 AND status IN ('connected', 'error')
-        ORDER BY provider ASC
+        ORDER BY provider ASC, display_name ASC
         "#
     );
     sqlx::query_as::<_, IntegrationConnection>(&q)
@@ -60,7 +62,7 @@ pub async fn list_for_workspace(
 pub async fn list_inbox_providers(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<String>> {
     let rows: Vec<(String,)> = sqlx::query_as(
         r#"
-        SELECT provider
+        SELECT DISTINCT provider
         FROM integration_connections
         WHERE workspace_id = $1 AND status IN ('connected', 'error')
         ORDER BY provider ASC
@@ -103,6 +105,8 @@ pub async fn find_connected(
         SELECT {COLS}
         FROM integration_connections
         WHERE workspace_id = $1 AND provider = $2 AND status = 'connected'
+        ORDER BY updated_at DESC
+        LIMIT 1
         "#
     );
     sqlx::query_as::<_, IntegrationConnection>(&q)
@@ -133,6 +137,8 @@ pub async fn find_proxy_connection(
               AND COALESCE(config->>'installation_id', '') <> ''
             )
           )
+        ORDER BY updated_at DESC
+        LIMIT 1
         "#
     );
     sqlx::query_as::<_, IntegrationConnection>(&q)
@@ -143,41 +149,31 @@ pub async fn find_proxy_connection(
         .map_err(map_query_err)
 }
 
-/// Insert or re-connect a provider for a workspace (replaces credentials).
+fn connection_name(new: &UpsertConnection) -> String {
+    new.display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Insert or re-connect. An empty name replaces the legacy unnamed row.
+/// A name inserts or refreshes that named connection and leaves the others.
 pub async fn upsert(pool: &PgPool, new: &UpsertConnection) -> DbResult<IntegrationConnection> {
-    // Fresh databases use UNIQUE (workspace_id, provider). A named-connection
-    // schema replaces that with a partial unique index, and Postgres will not
-    // infer the partial index from the bare column list.
-    match upsert_on_conflict(pool, new, "ON CONFLICT (workspace_id, provider)").await {
-        Err(err) if conflict_target_missing(&err) => {
-            upsert_on_conflict(
-                pool,
-                new,
-                "ON CONFLICT (workspace_id, provider) WHERE display_name = '' AND status <> 'disconnected'",
-            )
-            .await
-        }
-        other => other,
-    }
-}
-
-fn conflict_target_missing(err: &DbError) -> bool {
-    err.to_string()
-        .contains("no unique or exclusion constraint matching the ON CONFLICT")
-}
-
-async fn upsert_on_conflict(
-    pool: &PgPool,
-    new: &UpsertConnection,
-    conflict: &str,
-) -> DbResult<IntegrationConnection> {
+    let name = connection_name(new);
+    let conflict = if name.is_empty() {
+        "ON CONFLICT (workspace_id, provider) WHERE display_name = '' AND status <> 'disconnected'"
+    } else {
+        "ON CONFLICT (workspace_id, provider, display_name) WHERE display_name <> '' AND status <> 'disconnected'"
+    };
     let q = format!(
         r#"
         INSERT INTO integration_connections (
-            id, workspace_id, provider, status, account_label, config, credentials,
+            id, workspace_id, provider, status, account_label, display_name, config, credentials,
             connected_by, last_error, connected_at, updated_at, version
         )
-        VALUES ($1, $2, $3, 'connected', $4, $5, $6, $7, NULL, $8, $8, 1)
+        VALUES ($1, $2, $3, 'connected', $4, $5, $6, $7, $8, NULL, $9, $9, 1)
         {conflict}
         DO UPDATE SET
             status = 'connected',
@@ -197,6 +193,7 @@ async fn upsert_on_conflict(
         .bind(new.workspace_id)
         .bind(&new.provider)
         .bind(&new.account_label)
+        .bind(&name)
         .bind(&new.config)
         .bind(&new.credentials)
         .bind(new.connected_by)
@@ -204,6 +201,105 @@ async fn upsert_on_conflict(
         .fetch_one(pool)
         .await
         .map_err(map_query_err)
+}
+
+/// Rename one live connection. The name must be unique for that provider.
+pub async fn rename_connection(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    connection_id: Uuid,
+    display_name: &str,
+) -> DbResult<IntegrationConnection> {
+    let name = display_name.trim();
+    if name.is_empty() {
+        return Err(DbError::Conflict(
+            "connection name cannot be empty".into(),
+        ));
+    }
+    let q = format!(
+        r#"
+        UPDATE integration_connections
+        SET display_name = $3,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1 AND workspace_id = $2 AND status <> 'disconnected'
+        RETURNING {COLS}
+        "#
+    );
+    sqlx::query_as::<_, IntegrationConnection>(&q)
+        .bind(connection_id)
+        .bind(workspace_id)
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("connection not found".into()))
+}
+
+/// Soft-disconnect one connection. Other accounts for the same provider stay.
+pub async fn disconnect_by_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    connection_id: Uuid,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE integration_connections
+        SET status = 'disconnected',
+            credentials = '{}'::jsonb,
+            last_error = NULL,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1 AND workspace_id = $2 AND status <> 'disconnected'
+        "#,
+    )
+    .bind(connection_id)
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() > 0)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct IntegrationCategoryRow {
+    pub id: String,
+    pub label: String,
+    pub subtitle: String,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ProviderCategoryRow {
+    pub provider: String,
+    pub category_id: String,
+    pub label: String,
+}
+
+pub async fn list_categories(pool: &PgPool) -> DbResult<Vec<IntegrationCategoryRow>> {
+    sqlx::query_as(
+        r#"
+        SELECT id, label, subtitle, sort_order
+        FROM integration_categories
+        ORDER BY sort_order ASC, label ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+pub async fn list_provider_categories(pool: &PgPool) -> DbResult<Vec<ProviderCategoryRow>> {
+    sqlx::query_as(
+        r#"
+        SELECT p.provider, p.category_id, c.label
+        FROM integration_provider_categories p
+        JOIN integration_categories c ON c.id = p.category_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
 }
 
 /// Merge agent defaults into `config` without touching credentials.

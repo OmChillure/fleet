@@ -1,6 +1,7 @@
 //! App sidebar — collapsible sections with nested links (sidenav07-style, Dioxus).
 
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 
 use crate::Route;
 use crate::components::app_shell::clear_session_ok;
@@ -9,7 +10,8 @@ use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
 };
-use crate::pages::inbox::INBOX_APPS;
+use crate::pages::inbox::is_inbox_app;
+use crate::pages::integrations::{live_connections, load_integrations};
 use crate::theme::use_theme;
 use fleet_runners_view::routes::{
     RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
@@ -312,16 +314,7 @@ pub fn Sidebar() -> Element {
                         label: "Inbox",
                         expanded: chrome.inbox_nest,
                         on_toggle: move |_| update_nav(nav, |n| n.toggle_inbox_nest()),
-                        for app in INBOX_APPS.iter().copied() {
-                            NavSubLink {
-                                key: "{app.id}",
-                                to: Route::InboxApp {
-                                    workspace_id: workspace_id.clone(),
-                                    provider: app.id.to_string(),
-                                },
-                                label: app.name,
-                            }
-                        }
+                        InboxSideLinks { key: "{workspace_id}", workspace_id: workspace_id.clone() }
                     }
                 }
 
@@ -616,6 +609,111 @@ fn NavAccordion(
             if expanded {
                 div { class: "ml-2.5 flex flex-col border-l border-[var(--app-border)] pl-1.5",
                     {children}
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SideConnection {
+    id: String,
+    provider: String,
+    category: String,
+    name: String,
+    failed: bool,
+}
+
+#[component]
+fn InboxSideLinks(workspace_id: String) -> Element {
+    let mut rows = use_signal(Vec::<SideConnection>::new);
+    let ws = workspace_id.clone();
+    use_future(move || {
+        let ws = ws.clone();
+        async move {
+            loop {
+                if let Ok(snapshot) = load_integrations(&ws).await {
+                    let mut next = Vec::new();
+                    for integ in snapshot.integrations {
+                        if !is_inbox_app(&integ.id) {
+                            continue;
+                        }
+                        for conn in live_connections(&integ) {
+                            let failed = conn.status.eq_ignore_ascii_case("error");
+                            let on = !failed
+                                && (conn.connected || conn.status.eq_ignore_ascii_case("connected"));
+                            if !on && !failed {
+                                continue;
+                            }
+                            let name = if conn.display_name.trim().is_empty() {
+                                integ.name.clone()
+                            } else {
+                                conn.display_name.clone()
+                            };
+                            next.push(SideConnection {
+                                id: conn.id,
+                                provider: integ.id.clone(),
+                                category: if integ.category_label.is_empty() {
+                                    "Other".into()
+                                } else {
+                                    integ.category_label.clone()
+                                },
+                                name,
+                                failed,
+                            });
+                        }
+                    }
+                    rows.set(next);
+                }
+                TimeoutFuture::new(8000).await;
+            }
+        }
+    });
+    let list = rows();
+    if list.is_empty() {
+        return rsx! {
+            p { class: "px-2 py-1 text-xs text-[var(--app-muted)]", "No connected apps" }
+        };
+    }
+    let mut categories: Vec<String> = Vec::new();
+    for row in &list {
+        if !categories.iter().any(|c| c == &row.category) {
+            categories.push(row.category.clone());
+        }
+    }
+    rsx! {
+        for category in categories {
+            {
+                let items: Vec<_> = list.iter().filter(|r| r.category == category).cloned().collect();
+                rsx! {
+                    div { key: "{category}", class: "mt-1",
+                        p { class: "px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--app-muted)]",
+                            "{category}"
+                        }
+                        for item in items {
+                            {
+                                let tone = if item.failed {
+                                    "font-medium text-red-300"
+                                } else {
+                                    "text-[var(--app-muted)] hover:text-[var(--app-fg)]"
+                                };
+                                rsx! {
+                                    Link {
+                                        key: "{item.id}",
+                                        class: "block truncate rounded-md px-2 py-1 text-sm transition hover:bg-[var(--app-bg-hover)] {tone}",
+                                        to: Route::InboxConnection {
+                                            workspace_id: workspace_id.clone(),
+                                            provider: item.provider.clone(),
+                                            connection_id: item.id.clone(),
+                                        },
+                                        active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
+                                        "{item.name}"
+                                        if item.failed { " · failed" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

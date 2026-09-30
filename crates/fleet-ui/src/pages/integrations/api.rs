@@ -61,6 +61,8 @@ pub struct ConnectionPublic {
     #[serde(default)]
     pub account_label: Option<String>,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
     pub connected: bool,
     #[serde(default)]
     pub last_error: Option<String>,
@@ -87,6 +89,8 @@ pub struct Integration {
     pub description: String,
     pub category: String,
     pub category_label: String,
+    #[serde(default)]
+    pub category_id: String,
     pub availability: String,
     pub icon: String,
     #[serde(default)]
@@ -104,6 +108,22 @@ pub struct Integration {
     pub connected: bool,
     #[serde(default)]
     pub connection: Option<ConnectionPublic>,
+    #[serde(default)]
+    pub connections: Vec<ConnectionPublic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct IntegrationCategory {
+    pub id: String,
+    pub label: String,
+    pub subtitle: String,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct IntegrationsSnapshot {
+    pub categories: Vec<IntegrationCategory>,
+    pub integrations: Vec<Integration>,
 }
 
 /// Catalog `connected` can lag the nested connection row. Either is enough.
@@ -122,23 +142,29 @@ pub fn granted_repos(conn: &ConnectionPublic) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn integration_is_connected(i: &Integration) -> bool {
-    if integration_needs_reconnect(i) {
-        return false;
-    }
-    if i.connected {
-        return true;
-    }
-    i.connection
-        .as_ref()
-        .is_some_and(|c| c.connected || c.status.eq_ignore_ascii_case("connected"))
+pub fn live_connections(i: &Integration) -> Vec<ConnectionPublic> {
+    let rows = if i.connections.is_empty() {
+        i.connection.clone().into_iter().collect::<Vec<_>>()
+    } else {
+        i.connections.clone()
+    };
+    rows.into_iter()
+        .filter(|c| !c.status.eq_ignore_ascii_case("disconnected"))
+        .collect()
 }
 
-/// A previous Connect exists, but the provider rejected the saved token.
+pub fn integration_is_connected(i: &Integration) -> bool {
+    live_connections(i).iter().any(|c| {
+        !c.status.eq_ignore_ascii_case("error")
+            && (c.connected || c.status.eq_ignore_ascii_case("connected") || i.connected)
+    })
+}
+
+/// A saved login was rejected and no healthy connection remains.
 pub fn integration_needs_reconnect(i: &Integration) -> bool {
-    i.connection
-        .as_ref()
-        .is_some_and(|c| c.status.eq_ignore_ascii_case("error"))
+    let rows = live_connections(i);
+    !rows.is_empty()
+        && rows.iter().all(|c| c.status.eq_ignore_ascii_case("error"))
 }
 
 /// Inbox and proxy errors that mean the saved login should be replaced.
@@ -161,6 +187,8 @@ pub fn find_integration<'a>(list: &'a [Integration], provider: &str) -> Option<&
 
 #[derive(Debug, Clone, Deserialize)]
 struct IntegrationListResponse {
+    #[serde(default)]
+    categories: Vec<IntegrationCategory>,
     integrations: Vec<Integration>,
 }
 
@@ -212,17 +240,101 @@ async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(
 
 /// `GET /api/workspaces/{id}/integrations`
 pub async fn list_integrations(workspace_id: &str) -> Result<Vec<Integration>, IntegrationsError> {
+    Ok(load_integrations(workspace_id).await?.integrations)
+}
+
+pub async fn load_integrations(
+    workspace_id: &str,
+) -> Result<IntegrationsSnapshot, IntegrationsError> {
     let path = format!("/api/workspaces/{workspace_id}/integrations");
     let res = authorized_get(&path).await?;
     let body: IntegrationListResponse = parse_json_or_error(res).await?;
-    Ok(body.integrations)
+    Ok(IntegrationsSnapshot {
+        categories: body.categories,
+        integrations: body.integrations,
+    })
 }
 
 /// Absolute URL for full-page OAuth navigation (same-origin in dev via proxy).
 pub fn oauth_start_url(workspace_id: &str, provider: &str) -> String {
-    api_url(&format!(
+    oauth_start_url_named(workspace_id, provider, "")
+}
+
+pub fn oauth_start_url_named(workspace_id: &str, provider: &str, name: &str) -> String {
+    oauth_start_url_setup(workspace_id, provider, name, "")
+}
+
+pub fn oauth_start_url_setup(
+    workspace_id: &str,
+    provider: &str,
+    name: &str,
+    instance_url: &str,
+) -> String {
+    let mut url = api_url(&format!(
         "/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"
-    ))
+    ));
+    let mut query = Vec::new();
+    let name = name.trim();
+    if !name.is_empty() {
+        query.push(format!("name={}", urlencoding_name(name)));
+    }
+    let instance_url = instance_url.trim();
+    if !instance_url.is_empty() {
+        query.push(format!("url={}", urlencoding_name(instance_url)));
+    }
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(&query.join("&"));
+    }
+    url
+}
+
+fn urlencoding_name(name: &str) -> String {
+    let mut out = String::new();
+    for b in name.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+pub async fn rename_connection(
+    workspace_id: &str,
+    provider: &str,
+    connection_id: &str,
+    display_name: &str,
+) -> Result<(), IntegrationsError> {
+    let path = format!(
+        "/api/workspaces/{workspace_id}/integrations/{provider}/connections/{connection_id}"
+    );
+    let res = authorized_patch_json(&path, &json!({ "display_name": display_name })).await?;
+    if res.status().is_success() {
+        return Ok(());
+    }
+    parse_json_or_error::<ErrorBody>(res).await?;
+    Ok(())
+}
+
+pub async fn disconnect_connection(
+    workspace_id: &str,
+    provider: &str,
+    connection_id: &str,
+) -> Result<(), IntegrationsError> {
+    let path = format!(
+        "/api/workspaces/{workspace_id}/integrations/{provider}/connections/{connection_id}"
+    );
+    let res = authorized_delete(&path).await?;
+    if res.status().is_success() {
+        Ok(())
+    } else {
+        let _ = parse_json_or_error::<ErrorBody>(res).await?;
+        Ok(())
+    }
 }
 
 async fn authorized_patch_json(
@@ -275,6 +387,7 @@ pub async fn connect_gogs(
     base_url: &str,
     username: &str,
     password: &str,
+    display_name: &str,
 ) -> Result<(), IntegrationsError> {
     let path = format!("/api/workspaces/{workspace_id}/integrations/gogs/connect");
     let send = || {
@@ -284,7 +397,8 @@ pub async fn connect_gogs(
                 .json(&json!({
                     "base_url": base_url,
                     "username": username,
-                    "password": password
+                    "password": password,
+                    "display_name": display_name
                 })),
         )
         .send()
@@ -336,6 +450,7 @@ mod tests {
             description: String::new(),
             category: "hitl".into(),
             category_label: "HITL".into(),
+            category_id: "chat".into(),
             availability: "available".into(),
             icon: "slack".into(),
             docs_url: None,
@@ -351,11 +466,13 @@ mod tests {
                 provider: "slack".into(),
                 status: "connected".into(),
                 account_label: Some("agent-fleet".into()),
+                display_name: "Work".into(),
                 connected: true,
                 last_error: None,
                 config: serde_json::json!({ "granted_repos": ["acme/app"] }),
                 defaults: ConnectionDefaults::default(),
             }),
+            connections: Vec::new(),
         };
         assert!(integration_is_connected(&i));
         assert!(!integration_needs_reconnect(&i));
@@ -370,6 +487,7 @@ mod tests {
             description: String::new(),
             category: "code".into(),
             category_label: "Source control".into(),
+            category_id: "source_control".into(),
             availability: "available".into(),
             icon: "gitea".into(),
             docs_url: None,
@@ -385,11 +503,13 @@ mod tests {
                 provider: "gitea".into(),
                 status: "error".into(),
                 account_label: Some("fleet".into()),
+                display_name: "Gitea".into(),
                 connected: false,
                 last_error: Some("invalid username, password or token (401)".into()),
                 config: serde_json::json!({}),
                 defaults: ConnectionDefaults::default(),
             }),
+            connections: Vec::new(),
         };
         assert!(integration_needs_reconnect(&i));
         assert!(!integration_is_connected(&i));
@@ -410,6 +530,7 @@ mod tests {
             description: String::new(),
             category: "hitl".into(),
             category_label: "HITL".into(),
+            category_id: "chat".into(),
             availability: "available".into(),
             icon: "slack".into(),
             docs_url: None,
@@ -420,6 +541,7 @@ mod tests {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
         };
         assert!(!integration_is_connected(&i));
     }
@@ -432,6 +554,7 @@ mod tests {
             provider: "github".into(),
             status: "connected".into(),
             account_label: Some("vinybrun".into()),
+            display_name: "GitHub".into(),
             connected: true,
             last_error: None,
             config: serde_json::json!({ "granted_repos": ["vinybrun/agent-fleet-test-repo", ""] }),

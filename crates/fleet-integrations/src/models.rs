@@ -34,6 +34,9 @@ pub struct IntegrationView {
     pub description: String,
     pub category: IntegrationCategory,
     pub category_label: String,
+    /// Shared id from `integration_categories` (`source_control`, `chat`, …).
+    #[serde(default)]
+    pub category_id: String,
     pub availability: IntegrationAvailability,
     pub icon: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,11 +56,24 @@ pub struct IntegrationView {
     pub connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<IntegrationConnectionPublic>,
+    /// Every live connection for this provider. `connection` is the newest.
+    #[serde(default)]
+    pub connections: Vec<IntegrationConnectionPublic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntegrationCategoryView {
+    pub id: String,
+    pub label: String,
+    pub subtitle: String,
+    pub sort_order: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationListResponse {
     pub workspace_id: String,
+    #[serde(default)]
+    pub categories: Vec<IntegrationCategoryView>,
     pub integrations: Vec<IntegrationView>,
 }
 

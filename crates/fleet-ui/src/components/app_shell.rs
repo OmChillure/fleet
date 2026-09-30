@@ -30,6 +30,9 @@ pub fn AppShell() -> Element {
     let mut auth_state = use_signal(|| AuthGate::Ok);
     let mut gate_message = use_signal(|| Option::<String>::None);
     let navigator = use_navigator();
+    // Same route variant with a new id (two Gitea connections) must remount
+    // the page. Otherwise hooks keep the previous connection.
+    let outlet_key = use_route::<crate::Route>().to_string();
 
     use_effect(move || {
         spawn(async move {
@@ -109,6 +112,7 @@ pub fn AppShell() -> Element {
                 class: "{theme().root_class()} flex h-screen w-full overflow-hidden bg-[var(--app-sidebar)] text-[var(--app-fg)]",
                 Sidebar {}
                 main {
+                    key: "{outlet_key}",
                     class: "min-h-0 min-w-0 flex-1 overflow-auto bg-[var(--app-bg)]",
                     Outlet::<crate::Route> {}
                 }

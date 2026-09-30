@@ -3,23 +3,13 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    connect_gogs, disconnect_integration, integration_is_connected, integration_needs_reconnect,
-    list_integrations, oauth_start_url, patch_integration_defaults, Integration,
+    connect_gogs, integration_is_connected, list_integrations, live_connections, load_integrations,
+    oauth_start_url_setup, patch_integration_defaults, Integration, IntegrationCategory,
 };
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
 use crate::pages::inbox::is_inbox_app;
 use crate::Route;
-
-fn form_text(evt: &Event<FormData>, name: &str) -> String {
-    evt.data()
-        .get_first(name)
-        .map(|value| match value {
-            FormValue::Text(text) => text,
-            FormValue::File(_) => String::new(),
-        })
-        .unwrap_or_default()
-}
 
 /// How long we poll for a completed OAuth before giving up (~3 min).
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
@@ -173,17 +163,12 @@ mod oauth_bridge {
 #[component]
 pub fn Integrations(workspace_id: String) -> Element {
     let mut items = use_signal(|| Vec::<Integration>::new());
+    let mut categories = use_signal(|| Vec::<IntegrationCategory>::new());
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| Option::<String>::None);
-    // Provider currently connecting (OAuth tab open) — shows spinner on Connect.
+    // Provider currently connecting (OAuth tab open) — shows spinner on Add.
     let mut connecting_provider = use_signal(|| Option::<String>::None);
-    let mut busy_provider = use_signal(|| Option::<String>::None);
     let mut query = use_signal(|| String::new());
-    let mut gogs_open = use_signal(|| false);
-    let mut gogs_url = use_signal(|| "http://localhost:3034".to_string());
-    let mut gogs_user = use_signal(String::new);
-    let mut gogs_pass = use_signal(String::new);
-    let mut gogs_busy = use_signal(|| false);
 
     // Safe: only installs a JS listener that writes to thread_local (no signals).
     use_effect(move || {
@@ -195,9 +180,10 @@ pub fn Integrations(workspace_id: String) -> Element {
         let ws = workspace_id_load.clone();
         spawn(async move {
             loading.set(true);
-            match list_integrations(&ws).await {
-                Ok(list) => {
-                    items.set(list);
+            match load_integrations(&ws).await {
+                Ok(snapshot) => {
+                    items.set(snapshot.integrations);
+                    categories.set(snapshot.categories);
                     error.set(None);
                 }
                 Err(e) => {
@@ -231,7 +217,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                     "Integrations"
                 }
                 p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Connect tools. Tokens stay on the server, never in sandboxes."
+                    "Connected accounts are listed first. Add another account for the same service with its own name. Tokens stay on the server."
                 }
             }
 
@@ -272,346 +258,374 @@ pub fn Integrations(workspace_id: String) -> Element {
                     "{err}"
                 }
             } else if filtered.is_empty() {
-                p { class: "text-sm text-[var(--app-muted)]",
-                    if q.is_empty() {
-                        "No integrations available."
+                p { class: "text-sm text-[var(--app-muted)]", "No integrations match your search." }
+            } else {
+                IntegrationSections {
+                    workspace_id: workspace_id.clone(),
+                    integrations: filtered,
+                    categories: categories(),
+                    connecting_provider,
+                    items,
+                }
+            }
+
+        }
+    }
+}
+
+#[component]
+fn IntegrationSections(
+    workspace_id: String,
+    integrations: Vec<Integration>,
+    categories: Vec<IntegrationCategory>,
+    connecting_provider: Signal<Option<String>>,
+    mut items: Signal<Vec<Integration>>,
+) -> Element {
+    let groups = if categories.is_empty() {
+        let mut seen = Vec::<IntegrationCategory>::new();
+        for item in &integrations {
+            if seen.iter().any(|c| c.id == item.category_id) {
+                continue;
+            }
+            seen.push(IntegrationCategory {
+                id: item.category_id.clone(),
+                label: item.category_label.clone(),
+                subtitle: String::new(),
+                sort_order: seen.len() as i32,
+            });
+        }
+        seen
+    } else {
+        categories.clone()
+    };
+    let connected_count: usize = integrations.iter().map(|i| live_connections(i).len()).sum();
+
+    rsx! {
+        section { class: "mb-8",
+            h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Connected" }
+            p { class: "mt-1 mb-3 text-xs text-[var(--app-muted)]",
+                if connected_count == 0 {
+                    "No accounts connected yet. Add one below."
+                } else {
+                    "Each name is a separate account. Manage opens that account so you can rename it, update sign-in, or remove it."
+                }
+            }
+            for group in groups.clone() {
+                {
+                    let rows: Vec<(Integration, super::api::ConnectionPublic)> = integrations
+                        .iter()
+                        .filter(|i| i.category_id == group.id)
+                        .flat_map(|i| {
+                            live_connections(i)
+                                .into_iter()
+                                .map(|c| (i.clone(), c))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    if rows.is_empty() {
+                        rsx! { div { key: "c-{group.id}" } }
                     } else {
-                        "No integrations match your search."
+                        rsx! {
+                            div { key: "c-{group.id}", class: "mb-4",
+                                h3 { class: "m-0 mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--app-muted)]",
+                                    "{group.label}"
+                                }
+                                div { class: "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3",
+                                    for (integ, conn) in rows {
+                                        ConnectedCard {
+                                            key: "{conn.id}",
+                                            workspace_id: workspace_id.clone(),
+                                            integ: integ.clone(),
+                                            connection_id: conn.id.clone(),
+                                            display_name: conn.display_name.clone(),
+                                            account_label: conn.account_label.clone().unwrap_or_default(),
+                                            last_error: conn.last_error.clone().unwrap_or_default(),
+                                            failed: conn.status.eq_ignore_ascii_case("error"),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        section {
+            h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Add an integration" }
+            p { class: "mt-1 mb-3 text-xs text-[var(--app-muted)]",
+                "Every service Fleet can connect. Add asks for a name, then sign-in. The same service can be added again under another name."
+            }
+            for group in groups {
+                {
+                    let rows: Vec<Integration> = integrations
+                        .iter()
+                        .filter(|i| i.category_id == group.id)
+                        .cloned()
+                        .collect();
+                    if rows.is_empty() {
+                        rsx! { div { key: "a-{group.id}" } }
+                    } else {
+                        rsx! {
+                            div { key: "a-{group.id}", class: "mb-4",
+                                h3 { class: "m-0 mb-1 text-xs font-semibold uppercase tracking-wide text-[var(--app-muted)]",
+                                    "{group.label}"
+                                }
+                                if !group.subtitle.is_empty() {
+                                    p { class: "m-0 mb-2 text-xs text-[var(--app-muted)]", "{group.subtitle}" }
+                                }
+                                div { class: "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3",
+                                    for integ in rows {
+                                        AddCard {
+                                            key: "add-{integ.id}",
+                                            workspace_id: workspace_id.clone(),
+                                            integ: integ.clone(),
+                                            connecting_provider,
+                                            items,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ConnectedCard(
+    workspace_id: String,
+    integ: Integration,
+    connection_id: String,
+    display_name: String,
+    account_label: String,
+    last_error: String,
+    failed: bool,
+) -> Element {
+    let title = if display_name.trim().is_empty() {
+        integ.name.clone()
+    } else {
+        display_name.clone()
+    };
+    let border = if failed {
+        "border-red-500/60"
+    } else {
+        "border-[var(--app-border)]"
+    };
+    rsx! {
+        article { class: "flex flex-col rounded-2xl border {border} bg-[var(--app-bg-elevated)] p-4",
+            div { class: "flex items-start gap-3",
+                IntegrationLogo { icon: integ.icon.clone(), name: integ.name.clone() }
+                div { class: "min-w-0 flex-1",
+                    h2 { class: "m-0 truncate text-[15px] font-semibold text-[var(--app-fg)]", "{title}" }
+                    p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]",
+                        "{integ.name}"
+                        if !account_label.is_empty() { " · {account_label}" }
+                    }
+                    if failed {
+                        p { class: "m-0 mt-1 text-xs font-semibold text-red-300",
+                            "Sign-in failed"
+                            if !last_error.is_empty() { " · {last_error}" }
+                        }
+                    } else {
+                        p { class: "m-0 mt-1 text-xs text-[var(--app-muted)]", "Connected" }
+                    }
+                }
+            }
+            div { class: "mt-3 flex flex-wrap gap-2",
+                Link {
+                    to: Route::ConnectionEdit {
+                        workspace_id: workspace_id.clone(),
+                        provider: integ.id.clone(),
+                        connection_id: connection_id.clone(),
+                    },
+                    class: "inline-flex items-center text-xs font-semibold text-[var(--app-accent)] underline",
+                    "Manage"
+                }
+                if is_inbox_app(&integ.id) {
+                    Link {
+                        to: Route::InboxConnection {
+                            workspace_id: workspace_id.clone(),
+                            provider: integ.id.clone(),
+                            connection_id: connection_id.clone(),
+                        },
+                        class: "inline-flex items-center text-xs text-[var(--app-accent)] underline",
+                        "Open inbox"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AddCard(
+    workspace_id: String,
+    integ: Integration,
+    mut connecting_provider: Signal<Option<String>>,
+    mut items: Signal<Vec<Integration>>,
+) -> Element {
+    let available = integ.availability == "available";
+    let mut open = use_signal(|| false);
+    let mut draft_name = use_signal(String::new);
+    let mut draft_url = use_signal(String::new);
+    let mut draft_user = use_signal(String::new);
+    let mut draft_pass = use_signal(String::new);
+    let connecting = connecting_provider().as_deref() == Some(integ.id.as_str());
+    let ask_url = super::connection::needs_instance_url(&integ.id);
+    let ask_gogs = integ.id == "gogs";
+    let provider = integ.id.clone();
+    let provider_name = integ.name.clone();
+    rsx! {
+        article { class: "flex min-h-[7.5rem] flex-col rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+            div { class: "flex items-start gap-3",
+                IntegrationLogo { icon: integ.icon.clone(), name: integ.name.clone() }
+                div { class: "min-w-0",
+                    h2 { class: "m-0 truncate text-[15px] font-semibold text-[var(--app-fg)]", "{integ.name}" }
+                    p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]", "{integ.category_label}" }
+                }
+            }
+            p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
+                "{integ.description}"
+            }
+            if available {
+                button {
+                    class: "mt-3 inline-flex items-center justify-center rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs font-semibold text-[var(--app-fg)] disabled:opacity-60",
+                    r#type: "button",
+                    disabled: connecting,
+                    onclick: move |_| open.set(true),
+                    if connecting { "Connecting" } else { "Add" }
+                }
+                if open() {
+                    div { class: "fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4",
+                        div { class: "w-full max-w-md rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-5",
+                            h3 { class: "m-0 text-base font-semibold text-[var(--app-fg)]", "Add {provider_name}" }
+                            p { class: "mt-1 text-sm text-[var(--app-muted)]",
+                                "Name this account. You can add the same service again under a different name."
+                            }
+                            label { class: "mt-4 block text-xs text-[var(--app-muted)]",
+                                "Name"
+                                input {
+                                    class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                                    placeholder: "Work, Personal, …",
+                                    value: "{draft_name}",
+                                    oninput: move |e| draft_name.set(e.value()),
+                                }
+                            }
+                            if ask_url || ask_gogs {
+                                label { class: "mt-3 block text-xs text-[var(--app-muted)]",
+                                    if ask_gogs { "Gogs URL" } else { "Gitea URL" }
+                                    input {
+                                        class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                                        placeholder: if ask_gogs { "http://localhost:3034" } else { "https://gitea.example.com" },
+                                        value: "{draft_url}",
+                                        oninput: move |e| draft_url.set(e.value()),
+                                    }
+                                }
+                            }
+                            if ask_gogs {
+                                label { class: "mt-3 block text-xs text-[var(--app-muted)]",
+                                    "Username"
+                                    input {
+                                        class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                                        value: "{draft_user}",
+                                        oninput: move |e| draft_user.set(e.value()),
+                                    }
+                                }
+                                label { class: "mt-3 block text-xs text-[var(--app-muted)]",
+                                    "Password"
+                                    input {
+                                        class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                                        r#type: "password",
+                                        value: "{draft_pass}",
+                                        oninput: move |e| draft_pass.set(e.value()),
+                                    }
+                                }
+                            }
+                            div { class: "mt-4 flex justify-end gap-2",
+                                button {
+                                    class: "rounded-lg px-3 py-2 text-sm text-[var(--app-muted)]",
+                                    r#type: "button",
+                                    onclick: move |_| open.set(false),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "rounded-lg bg-[var(--app-accent)] px-3 py-2 text-sm font-semibold text-[var(--app-accent-fg)]",
+                                    r#type: "button",
+                                    onclick: {
+                                        let ws = workspace_id.clone();
+                                        let provider = provider.clone();
+                                        let label = provider_name.clone();
+                                        move |_| {
+                                            let name = draft_name().trim().to_string();
+                                            if name.is_empty() {
+                                                show_toast().error("Name this connection.");
+                                                return;
+                                            }
+                                            if (ask_url || ask_gogs) && draft_url().trim().is_empty() {
+                                                show_toast().error(if ask_gogs {
+                                                    "Enter the Gogs URL for this connection."
+                                                } else {
+                                                    "Enter the Gitea URL for this connection."
+                                                });
+                                                return;
+                                            }
+                                            if ask_gogs && (draft_user().trim().is_empty() || draft_pass().is_empty()) {
+                                                show_toast().error("Enter the Gogs username and password.");
+                                                return;
+                                            }
+                                            open.set(false);
+                                            if ask_gogs {
+                                                let base_url = draft_url().trim().to_string();
+                                                let username = draft_user().trim().to_string();
+                                                let password = draft_pass();
+                                                let ws = ws.clone();
+                                                let provider = provider.clone();
+                                                connecting_provider.set(Some(provider.clone()));
+                                                spawn(async move {
+                                                    match connect_gogs(&ws, &base_url, &username, &password, &name).await {
+                                                        Ok(()) => {
+                                                            poll_until_connected(&ws, &provider, &name, connecting_provider, items).await;
+                                                        }
+                                                        Err(err) => {
+                                                            connecting_provider.set(None);
+                                                            show_toast().error(err.message());
+                                                        }
+                                                    }
+                                                });
+                                                return;
+                                            }
+                                            let url = oauth_start_url_setup(&ws, &provider, &name, draft_url().trim());
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                if !open_oauth_tab(&url) {
+                                                    show_toast().error("Could not open auth tab. Allow popups for this site, then try again.");
+                                                    return;
+                                                }
+                                            }
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            {
+                                                let _ = url;
+                                            }
+                                            connecting_provider.set(Some(provider.clone()));
+                                            show_toast().info(format!("Authorize {label} in the new tab. This page will update when done."));
+                                            let ws = ws.clone();
+                                            let provider = provider.clone();
+                                            spawn(async move {
+                                                poll_until_connected(&ws, &provider, &name, connecting_provider, items).await;
+                                            });
+                                        }
+                                    },
+                                    "Continue"
+                                }
+                            }
+                        }
                     }
                 }
             } else {
-                div {
-                    class: "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3",
-                    for integ in filtered {
-                        {
-                            let integ_disconnect = integ.clone();
-                            let ws_disconnect = workspace_id.clone();
-                            let ws_connect = workspace_id.clone();
-                            let available = integ.availability == "available";
-                            let needs_reconnect = integration_needs_reconnect(&integ);
-                            let connected = integration_is_connected(&integ);
-                            let is_connecting =
-                                connecting_provider().as_deref() == Some(integ.id.as_str());
-                            let is_busy = busy_provider().as_deref() == Some(integ.id.as_str());
-                            let account = integ
-                                .connection
-                                .as_ref()
-                                .and_then(|c| c.account_label.clone())
-                                .unwrap_or_default();
-                            let repos = integ
-                                .connection
-                                .as_ref()
-                                .map(crate::pages::integrations::api::granted_repos)
-                                .unwrap_or_default();
-                            let last_error = integ
-                                .connection
-                                .as_ref()
-                                .and_then(|c| c.last_error.clone())
-                                .filter(|s| !s.trim().is_empty());
-                            let reconnect = !connected && last_error.is_some();
-
-                            let subtitle = if needs_reconnect || reconnect {
-                                "Sign-in failed".to_string()
-                            } else if connected && !account.is_empty() {
-                                if repos.is_empty() {
-                                    account.clone()
-                                } else {
-                                    format!("{account} · {}", repos.join(", "))
-                                }
-                            } else if is_connecting {
-                                "Connecting…".to_string()
-                            } else if !available {
-                                "Coming soon".to_string()
-                            } else {
-                                integ.category_label.clone()
-                            };
-
-                            let status_dot = if needs_reconnect {
-                                "bg-amber-400"
-                            } else if connected {
-                                "bg-emerald-400"
-                            } else if is_connecting {
-                                "bg-amber-400 animate-pulse"
-                            } else if available {
-                                "bg-neutral-500"
-                            } else {
-                                "bg-neutral-600"
-                            };
-
-                            let provider_connect = integ.id.clone();
-                            let provider_name = integ.name.clone();
-
-                            rsx! {
-                                article {
-                                    key: "{integ.id}",
-                                    class: "flex min-h-[7.5rem] flex-col rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 transition hover:border-neutral-600/90 hover:bg-[var(--app-bg-hover)]",
-
-                                    div { class: "flex items-start gap-3",
-                                        IntegrationLogo {
-                                            icon: integ.icon.clone(),
-                                            name: integ.name.clone(),
-                                        }
-                                        div { class: "min-w-0 flex-1",
-                                            h2 { class: "m-0 truncate text-[15px] font-semibold tracking-tight text-[var(--app-fg)]",
-                                                "{integ.name}"
-                                            }
-                                            div { class: "mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[var(--app-muted)]",
-                                                span {
-                                                    class: "inline-block h-1.5 w-1.5 shrink-0 rounded-full {status_dot}"
-                                                }
-                                                span { class: "min-w-0 break-all", title: "{subtitle}", "{subtitle}" }
-                                                if needs_reconnect || reconnect {
-                                                    span { class: "text-amber-300", "· Reconnect" }
-                                                } else if connected {
-                                                    span { class: "text-emerald-400/90", "· Connected" }
-                                                }
-                                            }
-                                        }
-
-                                        if available && !connected {
-                                            button {
-                                                class: "inline-flex min-w-[5.5rem] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs font-semibold text-[var(--app-fg)] transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-80",
-                                                r#type: "button",
-                                                disabled: is_connecting,
-                                                title: if is_connecting {
-                                                    "Waiting for authorization in the other tab…"
-                                                } else if needs_reconnect || reconnect {
-                                                    "Check the existing app install and reconnect"
-                                                } else {
-                                                    "Sign in with the provider and grant permissions"
-                                                },
-                                                onclick: move |_| {
-                                                    if connecting_provider().as_deref() == Some(provider_connect.as_str()) {
-                                                        return;
-                                                    }
-                                                    let provider = provider_connect.clone();
-                                                    if provider == "gogs" {
-                                                        gogs_open.set(true);
-                                                        return;
-                                                    }
-                                                    let ws = ws_connect.clone();
-                                                    let name = provider_name.clone();
-                                                    let url = oauth_start_url(&ws, &provider);
-
-                                                    #[cfg(target_arch = "wasm32")]
-                                                    {
-                                                        let opened = open_oauth_tab(&url);
-                                                        if !opened {
-                                                            show_toast().error(
-                                                                "Could not open auth tab. Allow popups for this site, then try again.",
-                                                            );
-                                                            return;
-                                                        }
-                                                    }
-                                                    #[cfg(not(target_arch = "wasm32"))]
-                                                    {
-                                                        let _ = url;
-                                                    }
-
-                                                    connecting_provider.set(Some(provider.clone()));
-                                                    show_toast().info(format!(
-                                                        "Authorize {name} in the new tab. This page will update when done."
-                                                    ));
-
-                                                    spawn(async move {
-                                                        poll_until_connected(
-                                                            &ws,
-                                                            &provider,
-                                                            connecting_provider,
-                                                            items,
-                                                        )
-                                                        .await;
-                                                    });
-                                                },
-                                                if is_connecting {
-                                                    Spinner {}
-                                                    span { "Connecting" }
-                                                } else if needs_reconnect || reconnect {
-                                                    span { "Reconnect" }
-                                                } else {
-                                                    span { "Connect" }
-                                                }
-                                            }
-                                        } else if available && (connected || needs_reconnect) {
-                                            button {
-                                                class: "shrink-0 rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/15 disabled:opacity-50",
-                                                r#type: "button",
-                                                disabled: is_busy,
-                                                title: "Disconnect {integ.name}",
-                                                onclick: move |_| {
-                                                    let provider = integ_disconnect.id.clone();
-                                                    let ws = ws_disconnect.clone();
-                                                    busy_provider.set(Some(provider.clone()));
-                                                    spawn(async move {
-                                                        match disconnect_integration(&ws, &provider).await {
-                                                            Ok(()) => {
-                                                                if let Ok(list) = list_integrations(&ws).await {
-                                                                    items.set(list);
-                                                                }
-                                                                show_toast().success(format!(
-                                                                    "{provider} disconnected."
-                                                                ));
-                                                            }
-                                                            Err(e) => {
-                                                                show_toast().error(e.message());
-                                                            }
-                                                        }
-                                                        busy_provider.set(None);
-                                                    });
-                                                },
-                                                if is_busy {
-                                                    Spinner {}
-                                                } else {
-                                                    span { "Disconnect" }
-                                                }
-                                            }
-                                        } else {
-                                            button {
-                                                class: "shrink-0 cursor-not-allowed rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs font-medium text-[var(--app-muted)] opacity-50",
-                                                r#type: "button",
-                                                disabled: true,
-                                                if !available { "Soon" } else { "Setup" }
-                                            }
-                                        }
-                                    }
-
-                                    p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
-                                        "{integ.description}"
-                                    }
-                                    if is_inbox_app(&integ.id) {
-                                        Link {
-                                            to: Route::InboxApp {
-                                                workspace_id: workspace_id.clone(),
-                                                provider: integ.id.clone(),
-                                            },
-                                            class: "mt-2 inline-block text-xs text-[var(--app-accent)] underline",
-                                            "Open inbox"
-                                        }
-                                    }
-                                    if let Some(err) = last_error.as_deref() {
-                                        if !connected {
-                                            p { class: "mt-2 text-xs leading-snug text-red-300/90",
-                                                "{err}"
-                                            }
-                                        }
-                                    }
-                                    if connected {
-                                        IntegrationDefaults {
-                                            workspace_id: workspace_id.clone(),
-                                            integ: integ.clone(),
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                p { class: "mt-3 text-xs text-[var(--app-muted)]", "Coming soon" }
             }
-            if gogs_open() {
-                div {
-                    class: "fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4",
-                    onclick: move |_| {
-                        if !gogs_busy() {
-                            gogs_open.set(false);
-                        }
-                    },
-                    form {
-                        class: "w-full max-w-sm rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                        onclick: move |e| e.stop_propagation(),
-                        onsubmit: move |e| {
-                            e.prevent_default();
-                            if gogs_busy() {
-                                return;
-                            }
-                            // Read the DOM values. A password manager can fill the
-                            // fields without updating the signals.
-                            let base_url = form_text(&e, "gogs_base_url");
-                            let username = form_text(&e, "gogs_username");
-                            let password = form_text(&e, "gogs_password");
-                            let base_url = if base_url.trim().is_empty() {
-                                gogs_url()
-                            } else {
-                                base_url
-                            };
-                            let username = if username.trim().is_empty() {
-                                gogs_user()
-                            } else {
-                                username
-                            };
-                            let password = if password.is_empty() { gogs_pass() } else { password };
-                            gogs_url.set(base_url.clone());
-                            gogs_user.set(username.clone());
-                            let ws = workspace_id.clone();
-                            gogs_busy.set(true);
-                            spawn(async move {
-                                match connect_gogs(&ws, &base_url, &username, &password).await {
-                                    Ok(()) => {
-                                        if let Ok(list) = list_integrations(&ws).await {
-                                            items.set(list);
-                                        }
-                                        gogs_pass.set(String::new());
-                                        gogs_open.set(false);
-                                        show_toast().success("Gogs connected.");
-                                    }
-                                    Err(err) => show_toast().error(err.message()),
-                                }
-                                gogs_busy.set(false);
-                            });
-                        },
-                        h2 { class: "m-0 text-base font-semibold text-[var(--app-fg)]", "Connect Gogs" }
-                        p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                            "Gogs has no OAuth app. Fleet signs in once at this instance and stores an API token on the server."
-                        }
-                        label { class: "mt-3 block text-xs text-[var(--app-muted)]", "Instance URL"
-                            input {
-                                class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]",
-                                r#type: "url",
-                                name: "gogs_base_url",
-                                placeholder: "http://localhost:3034",
-                                autocomplete: "off",
-                                value: "{gogs_url}",
-                                oninput: move |e| gogs_url.set(e.value()),
-                            }
-                        }
-                        label { class: "mt-3 block text-xs text-[var(--app-muted)]", "Username"
-                            input {
-                                class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]",
-                                r#type: "text",
-                                name: "gogs_username",
-                                autocomplete: "off",
-                                value: "{gogs_user}",
-                                oninput: move |e| gogs_user.set(e.value()),
-                            }
-                        }
-                        label { class: "mt-3 block text-xs text-[var(--app-muted)]", "Password"
-                            input {
-                                class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]",
-                                r#type: "password",
-                                name: "gogs_password",
-                                autocomplete: "new-password",
-                                value: "{gogs_pass}",
-                                oninput: move |e| gogs_pass.set(e.value()),
-                            }
-                        }
-                        div { class: "mt-4 flex justify-end gap-2",
-                            button {
-                                class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs text-[var(--app-fg)]",
-                                r#type: "button",
-                                disabled: gogs_busy(),
-                                onclick: move |_| gogs_open.set(false),
-                                "Cancel"
-                            }
-                            button {
-                                class: "rounded-lg bg-[var(--app-accent)] px-2.5 py-1 text-xs font-semibold text-[var(--app-bg)] disabled:opacity-60",
-                                r#type: "submit",
-                                disabled: gogs_busy(),
-                                if gogs_busy() { "Connecting…" } else { "Connect" }
-                            }
-                        }
-                    }
-                }
-            }
-
         }
     }
 }
@@ -812,9 +826,26 @@ fn mark_connected_locally(mut items: Signal<Vec<Integration>>, provider: &str) {
     }
 }
 
+fn named_connection_is_live(list: &[Integration], provider: &str, name: &str) -> bool {
+    list.iter().any(|i| {
+        if !i.id.eq_ignore_ascii_case(provider) {
+            return false;
+        }
+        if name.is_empty() {
+            return integration_is_connected(i);
+        }
+        live_connections(i).iter().any(|c| {
+            c.display_name.eq_ignore_ascii_case(name)
+                && !c.status.eq_ignore_ascii_case("error")
+                && (c.connected || c.status.eq_ignore_ascii_case("connected"))
+        })
+    })
+}
+
 async fn refresh_until_connected(
     workspace_id: &str,
     provider: &str,
+    name: &str,
     mut items: Signal<Vec<Integration>>,
     attempts: u32,
     delay_ms: u32,
@@ -822,9 +853,7 @@ async fn refresh_until_connected(
     for _ in 0..attempts {
         match list_integrations(workspace_id).await {
             Ok(list) => {
-                let done = list
-                    .iter()
-                    .any(|i| i.id.eq_ignore_ascii_case(provider) && integration_is_connected(i));
+                let done = named_connection_is_live(&list, provider, name);
                 items.set(list);
                 if done {
                     return true;
@@ -840,6 +869,7 @@ async fn refresh_until_connected(
 async fn poll_until_connected(
     workspace_id: &str,
     provider: &str,
+    name: &str,
     mut connecting_provider: Signal<Option<String>>,
     mut items: Signal<Vec<Integration>>,
 ) {
@@ -859,7 +889,7 @@ async fn poll_until_connected(
 
                     // Confirm with server (DB may lag a beat behind the popup).
                     let confirmed =
-                        refresh_until_connected(workspace_id, provider, items, 20, 300).await;
+                        refresh_until_connected(workspace_id, provider, name, items, 20, 300).await;
 
                     connecting_provider.set(None);
                     if confirmed {
@@ -885,9 +915,7 @@ async fn poll_until_connected(
 
         // Background poll even without postMessage (popup closed / opener lost).
         if let Ok(list) = list_integrations(workspace_id).await {
-            let done = list
-                .iter()
-                .any(|i| i.id.eq_ignore_ascii_case(provider) && integration_is_connected(i));
+            let done = named_connection_is_live(&list, provider, name);
             items.set(list);
             if done {
                 connecting_provider.set(None);

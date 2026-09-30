@@ -28,6 +28,8 @@ pub struct PageData {
     pub auto_launch: Signal<bool>,
     pub busy: Signal<bool>,
     pub finish_error: Signal<Option<(String, String)>>,
+    pub connection_id: Signal<String>,
+    pub connection_title: Signal<String>,
 }
 
 impl PageData {
@@ -63,6 +65,12 @@ impl PageData {
     }
     pub fn finish_error(self) -> Option<(String, String)> {
         (self.finish_error)()
+    }
+    pub fn connection_id(self) -> String {
+        (self.connection_id)()
+    }
+    pub fn connection_title(self) -> String {
+        (self.connection_title)()
     }
 }
 
@@ -247,7 +255,34 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
     let status = data.status_line();
     let provider = info.id.to_string();
     let ws_refresh = ws.to_string();
+    let title = {
+        let named = data.connection_title();
+        if named.trim().is_empty() {
+            info.name.to_string()
+        } else {
+            named
+        }
+    };
+    let connection_id = data.connection_id();
     rsx! {
+        div { class: "flex flex-col gap-3",
+        if broken {
+            div { class: "rounded-xl border border-red-500/50 bg-red-500/15 px-4 py-3 text-sm text-red-100",
+                p { class: "m-0 font-semibold", "Sign-in failed for {title}" }
+                p { class: "m-0 mt-1", "Fleet cannot read this account until you reconnect it." }
+                if !connection_id.is_empty() {
+                    Link {
+                        to: Route::ConnectionEdit {
+                            workspace_id: ws.to_string(),
+                            provider: provider.clone(),
+                            connection_id: connection_id.clone(),
+                        },
+                        class: "mt-2 inline-block font-semibold text-red-50 underline",
+                        "Fix this connection"
+                    }
+                }
+            }
+        }
         div { class: "flex flex-wrap items-start justify-between gap-3",
             div { class: "flex min-w-0 items-start gap-3",
                 IntegrationLogo { icon: info.id.to_string(), name: info.name.to_string() }
@@ -258,8 +293,9 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
                         "Inbox"
                     }
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]",
-                        "{info.name}"
+                        "{title}"
                     }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]", "{info.name}" }
                     p { class: "mt-1 max-w-xl text-sm text-[var(--app-muted)]", "{info.work}" }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
                         if broken {
@@ -270,6 +306,17 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
                             "Not connected yet · "
                         }
                         "{status}"
+                    }
+                    if !connection_id.is_empty() {
+                        Link {
+                            to: Route::ConnectionEdit {
+                                workspace_id: ws.to_string(),
+                                provider: provider.clone(),
+                                connection_id: connection_id.clone(),
+                            },
+                            class: "mt-1 inline-block text-xs text-[var(--app-accent)] underline",
+                            "Manage this connection"
+                        }
                     }
                 }
             }
@@ -297,6 +344,7 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
             "{info.outcome}"
         }
         {extra}
+        }
     }
 }
 

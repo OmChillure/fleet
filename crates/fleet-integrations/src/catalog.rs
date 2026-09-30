@@ -3,7 +3,31 @@
 use crate::models::{AuthMethod, IntegrationAvailability, IntegrationCategory, IntegrationView};
 
 /// Static catalog (connection + oauth_configured filled in routes).
+/// Inbox and Integrations share these ids. The database seed matches this map.
+pub fn shared_category(provider: &str) -> (&'static str, &'static str) {
+    match provider {
+        "github" | "gitlab" | "gitea" | "gogs" | "bitbucket" => ("source_control", "Source control"),
+        "jira" | "linear" | "asana" | "trello" => ("issue_trackers", "Issue trackers"),
+        "slack" | "teams" | "discord" => ("chat", "Chat"),
+        "notion" | "confluence" | "google_drive" => ("docs", "Docs"),
+        "figma" => ("design", "Design"),
+        _ => ("", ""),
+    }
+}
+
 pub fn catalog() -> Vec<IntegrationView> {
+    let mut items = raw_catalog();
+    for item in &mut items {
+        let (id, label) = shared_category(&item.id);
+        if !id.is_empty() {
+            item.category_id = id.to_string();
+            item.category_label = label.to_string();
+        }
+    }
+    items
+}
+
+fn raw_catalog() -> Vec<IntegrationView> {
     vec![
         // --- Available (OAuth implemented) ---
         IntegrationView {
@@ -22,6 +46,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "jira".into(),
@@ -39,6 +65,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "slack".into(),
@@ -56,6 +84,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "linear".into(),
@@ -73,6 +103,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "gitlab".into(),
@@ -90,6 +122,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "gitea".into(),
@@ -107,6 +141,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "gogs".into(),
@@ -124,6 +160,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "bitbucket".into(),
@@ -141,6 +179,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "teams".into(),
@@ -158,6 +198,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "discord".into(),
@@ -175,6 +217,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "figma".into(),
@@ -192,6 +236,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "notion".into(),
@@ -209,6 +255,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "confluence".into(),
@@ -226,6 +274,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "asana".into(),
@@ -243,6 +293,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "trello".into(),
@@ -260,6 +312,8 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
         IntegrationView {
             id: "google_drive".into(),
@@ -277,8 +331,25 @@ pub fn catalog() -> Vec<IntegrationView> {
             oauth_app_create_url: None,
             connected: false,
             connection: None,
+            connections: Vec::new(),
+            category_id: String::new(),
         },
     ]
+}
+
+#[cfg(test)]
+mod shared_category_tests {
+    use super::*;
+
+    #[test]
+    fn every_catalog_provider_has_the_shared_category() {
+        for item in catalog() {
+            let (id, label) = shared_category(&item.id);
+            assert_eq!(item.category_id, id, "{}", item.id);
+            assert_eq!(item.category_label, label, "{}", item.id);
+            assert!(!id.is_empty(), "{}", item.id);
+        }
+    }
 }
 
 pub fn find_provider(id: &str) -> Option<IntegrationView> {
