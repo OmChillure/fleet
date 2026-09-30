@@ -13,8 +13,8 @@ use fleet_orchestrator::domain::{
 };
 use fleet_orchestrator::orch::TickRunner;
 use fleet_orchestrator::store::{
-    connect, host_is_this_machine, migrate, select_assignable_host,
-    select_assignable_runner_preferring, AssignableHost, BoardTaskRow, Store,
+    AssignableHost, BoardTaskRow, Store, connect, host_is_this_machine, migrate,
+    select_assignable_host, select_assignable_runner_preferring,
 };
 use uuid::Uuid;
 
@@ -176,6 +176,15 @@ async fn age_last_seen(store: &Store, host_id: Uuid, seconds: i64) {
     .expect("age last_seen");
 }
 
+fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(bin).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 fn require_this_machine_hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -187,20 +196,40 @@ fn require_this_machine_hostname() -> String {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| panic!("this-machine fixture needs HOSTNAME or /etc/hostname"))
+        .or_else(|| command_stdout("uname", &["-n"]))
+        .or_else(|| command_stdout("hostname", &[]))
+        .unwrap_or_else(|| {
+            panic!("this-machine fixture needs HOSTNAME, /etc/hostname, or hostname")
+        })
 }
 
 fn require_local_nonloopback_ip() -> String {
-    if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
-        if output.status.success() {
-            for tok in String::from_utf8_lossy(&output.stdout).split_whitespace() {
-                if tok != "127.0.0.1" && tok != "::1" {
-                    return tok.to_string();
-                }
+    if let Some(text) = command_stdout("hostname", &["-I"]) {
+        for tok in text.split_whitespace() {
+            if tok != "127.0.0.1" && tok != "::1" {
+                return tok.to_string();
             }
         }
     }
-    panic!("advertised-IP fixture needs a non-loopback address from hostname -I");
+    if let Some(text) = command_stdout("ifconfig", &[]) {
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line
+                .strip_prefix("inet ")
+                .or_else(|| line.strip_prefix("inet6 "))
+            else {
+                continue;
+            };
+            let Some(addr) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let addr = addr.split('%').next().unwrap_or(addr);
+            if addr != "127.0.0.1" && addr != "::1" {
+                return addr.to_string();
+            }
+        }
+    }
+    panic!("advertised-IP fixture needs a non-loopback address from hostname -I or ifconfig");
 }
 
 async fn stamp_hardware_addrs(store: &Store, host_id: Uuid, addrs: &[&str]) {
@@ -220,11 +249,7 @@ async fn clear_host_identity(store: &Store, host_id: Uuid) {
         .expect("clear hostname and hardware");
 }
 
-async fn leftover_this_machine_ids(
-    store: &Store,
-    project_id: Uuid,
-    except: &[Uuid],
-) -> Vec<Uuid> {
+async fn leftover_this_machine_ids(store: &Store, project_id: Uuid, except: &[Uuid]) -> Vec<Uuid> {
     let listed = worker_hosts::list_assignable(
         store.pool(),
         project_id,
@@ -240,11 +265,7 @@ async fn leftover_this_machine_ids(
 }
 
 /// Cross-workspace this-machine boxes the picker merges in (live fleet-host).
-async fn leftover_this_machine_container(
-    store: &Store,
-    project_id: Uuid,
-    except: &[Uuid],
-) -> bool {
+async fn leftover_this_machine_container(store: &Store, project_id: Uuid, except: &[Uuid]) -> bool {
     leftover_cross_ws_this_machine(store, project_id, except)
         .await
         .iter()
@@ -814,10 +835,9 @@ async fn vm_min_isolation_skips_container_host() {
     )
     .await
     .expect("list_assignable");
-    let ctr_row = listed
-        .iter()
-        .find(|h| h.id == ctr)
-        .expect("container-only fixture must stay in list_assignable (empty-list is not this skip)");
+    let ctr_row = listed.iter().find(|h| h.id == ctr).expect(
+        "container-only fixture must stay in list_assignable (empty-list is not this skip)",
+    );
     assert!(
         !ctr_row.advertised_host && ctr_row.advertised_container,
         "fixture must be container-only on the row the picker sees"
@@ -930,13 +950,9 @@ async fn select_assignable_host_process_need_assigns_container_only() {
     seed_workspace(&store, project.id).await;
     let host = pair_host(&store, project.id, "ctr-only", false, true).await;
 
-    let chosen = select_assignable_runner_preferring(
-        &store,
-        project.id,
-        None,
-        "http://example.test:8080",
-    )
-    .await;
+    let chosen =
+        select_assignable_runner_preferring(&store, project.id, None, "http://example.test:8080")
+            .await;
     assert!(
         chosen.is_none(),
         "on-pc picker must not assign a container-only host: {chosen:?}"
@@ -1190,19 +1206,7 @@ async fn tick_must_not_assign_home_offbox_over_cluster_this_machine_on_loopback(
         .unwrap();
     seed_workspace(&store, other.id).await;
 
-    let local_name = std::env::var("HOSTNAME")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| {
-            panic!("cluster this-machine fixture needs HOSTNAME or /etc/hostname")
-        });
+    let local_name = require_this_machine_hostname();
     let cluster_local = pair_host(&store, other.id, &local_name, true, false).await;
     sqlx::query(
         "UPDATE worker_hosts SET labels = array['cluster'], run_mode = 'in_container' WHERE id = $1",
