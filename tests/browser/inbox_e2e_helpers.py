@@ -139,12 +139,13 @@ def seed_connected_github(workspace_id: str) -> None:
     sql_for_workspace(
         workspace_id,
         "INSERT INTO integration_connections ("
-        "id, workspace_id, provider, status, account_label, config, credentials, "
+        "id, workspace_id, provider, status, account_label, display_name, config, credentials, "
         "connected_at, updated_at, version"
         ") VALUES ("
         f"gen_random_uuid(), {_lit(workspace_id)}, 'github', 'connected', "
-        "'inbox-e2e', '{}'::jsonb, '{}'::jsonb, now(), now(), 1"
-        ") ON CONFLICT (workspace_id, provider) DO UPDATE SET "
+        "'inbox-e2e', 'inbox-e2e', '{{}}'::jsonb, '{{}}'::jsonb, now(), now(), 1"
+        ") ON CONFLICT (workspace_id, provider, display_name) "
+        "WHERE display_name <> '' AND status <> 'disconnected' DO UPDATE SET "
         "status = 'connected', last_error = NULL, updated_at = now()",
     )
 

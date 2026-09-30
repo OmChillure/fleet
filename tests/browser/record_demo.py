@@ -797,7 +797,7 @@ class Demo:
                 self.bug("Observe still enabled after cancel")
 
     def scene_inbox(self) -> None:
-        from inbox_e2e_helpers import seed_open_ticket
+        from inbox_e2e_helpers import seed_connected_github, seed_open_ticket
 
         base = self.ensure_session()
         p = self.page
@@ -824,13 +824,20 @@ class Demo:
                 self.bug("Start monitor neither enabled nor explained connect-first")
         gh = p.get_by_role("link", name="GitHub", exact=True)
         if gh.count() == 0:
-            # Unconnected apps stay off the sidebar. The provider page is still the board.
+            # Unconnected apps stay off the sidebar. The provider URL explains that.
             p.goto(f"{base}/inbox/github", wait_until="networkidle")
         else:
             gh.first.click()
         pause(p, 800)
         if "GitHub automation" not in p.inner_text("body"):
-            raise RuntimeError("GitHub inbox missing automation board")
+            if "Nothing is connected" not in p.inner_text("body"):
+                raise RuntimeError("GitHub inbox missing automation board")
+            seed_connected_github(ws)
+            p.goto(f"{base}/inbox/github", wait_until="networkidle")
+            try:
+                p.get_by_text("GitHub automation", exact=False).first.wait_for(timeout=15_000)
+            except Exception as e:
+                raise RuntimeError("GitHub inbox missing automation board") from e
         body = p.inner_text("body")
         if "{provider}" in body:
             raise RuntimeError("GitHub webhook still has {provider} in the URL")
