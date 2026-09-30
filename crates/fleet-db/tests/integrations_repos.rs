@@ -295,12 +295,14 @@ async fn list_for_workspace_includes_github_error_with_installation_id() {
         .await
         .expect("list");
     let providers: Vec<&str> = listed.iter().map(|r| r.provider.as_str()).collect();
-    assert_eq!(providers, vec!["github"]);
+    assert_eq!(providers, vec!["github", "slack"]);
     assert_eq!(listed[0].status, "error");
     assert_eq!(
         listed[0].last_error.as_deref(),
         Some("GitHub API 401: bad credentials")
     );
+    assert_eq!(listed[1].status, "error");
+    assert_eq!(listed[1].last_error.as_deref(), Some("invalid_auth"));
 }
 
 /// Global nonce PK: first insert wins for every workspace and provider.
