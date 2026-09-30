@@ -37,7 +37,10 @@ impl Default for NavChrome {
 }
 
 pub fn is_inbox_route(route: &Route) -> bool {
-    matches!(route, Route::Inbox { .. } | Route::InboxApp { .. })
+    matches!(
+        route,
+        Route::Inbox { .. } | Route::InboxApp { .. } | Route::InboxConnection { .. }
+    )
 }
 
 pub fn section_for_route(route: &Route) -> Option<NavSection> {
@@ -52,14 +55,17 @@ pub fn section_for_route(route: &Route) -> Option<NavSection> {
         | Route::Cases { .. }
         | Route::CaseDetail { .. }
         | Route::Inbox { .. }
-        | Route::InboxApp { .. } => Some(NavSection::Monitoring),
+        | Route::InboxApp { .. }
+        | Route::InboxConnection { .. } => Some(NavSection::Monitoring),
         Route::Agents { .. } => Some(NavSection::Agents),
         Route::SelfHosted { .. }
         | Route::CloudPage { .. }
         | Route::PartnersPage { .. }
         | Route::RunnersIndex { .. }
         | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
-        Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
+        Route::Integrations { .. }
+        | Route::ConnectionEdit { .. }
+        | Route::Settings { .. } => Some(NavSection::Workspace),
         Route::Admin {} => Some(NavSection::Instance),
         _ => None,
     }

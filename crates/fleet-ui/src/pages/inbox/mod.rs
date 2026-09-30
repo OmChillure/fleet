@@ -8,6 +8,6 @@ mod page;
 mod shared;
 mod views;
 
-pub use app::InboxApp;
+pub use app::{InboxApp, InboxConnection};
 pub use catalog::{INBOX_APPS, is_inbox_app};
 pub use page::Inbox;

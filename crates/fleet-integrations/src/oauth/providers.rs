@@ -21,6 +21,16 @@ pub fn authorize_url(
     client: &OAuthClientConfig,
     state: &str,
 ) -> AppResult<String> {
+    authorize_url_at(provider, cfg, client, state, None)
+}
+
+pub fn authorize_url_at(
+    provider: &str,
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    state: &str,
+    instance_url: Option<&str>,
+) -> AppResult<String> {
     let redirect = cfg.callback_url(provider);
     let redirect_enc = urlencoding(redirect.as_str());
     let state_enc = urlencoding(state);
@@ -48,7 +58,7 @@ pub fn authorize_url(
         ),
         "gitea" => format!(
             "{base}/login/oauth/authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}",
-            base = cfg.gitea_base_url.trim_end_matches('/'),
+            base = gitea_base(cfg, instance_url),
             scope = urlencoding("read:user read:repository write:repository read:issue write:issue"),
         ),
         "slack" => format!(
@@ -130,11 +140,30 @@ pub async fn exchange_code(
     client: &OAuthClientConfig,
     code: &str,
 ) -> AppResult<TokenBundle> {
+    exchange_code_at(provider, cfg, client, code, None).await
+}
+
+fn gitea_base(cfg: &IntegrationsConfig, instance_url: Option<&str>) -> String {
+    instance_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cfg.gitea_base_url.trim())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub async fn exchange_code_at(
+    provider: &str,
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+    instance_url: Option<&str>,
+) -> AppResult<TokenBundle> {
     tracing::debug!(provider = %provider, "oauth token exchange starting");
     let result = match provider {
         "github" => exchange_github(cfg, client, code).await,
         "gitlab" => exchange_gitlab(cfg, client, code).await,
-        "gitea" => exchange_gitea(cfg, client, code).await,
+        "gitea" => exchange_gitea(cfg, client, code, instance_url).await,
         "slack" => exchange_slack(cfg, client, code).await,
         "linear" => exchange_linear(cfg, client, code).await,
         "jira" => exchange_jira(cfg, client, code).await,
@@ -291,8 +320,9 @@ async fn exchange_gitea(
     cfg: &IntegrationsConfig,
     client: &OAuthClientConfig,
     code: &str,
+    instance_url: Option<&str>,
 ) -> AppResult<TokenBundle> {
-    let base = cfg.gitea_base_url.trim_end_matches('/').to_string();
+    let base = gitea_base(cfg, instance_url);
     let http = http_client()?;
     let res = http
         .post(format!("{base}/login/oauth/access_token"))

@@ -14,6 +14,12 @@ pub struct OAuthStateClaims {
     pub sub: String,
     pub workspace_id: String,
     pub provider: String,
+    /// User-chosen connection name. Empty keeps the legacy unnamed row.
+    #[serde(default)]
+    pub display_name: String,
+    /// Self-hosted base URL (Gitea). Empty uses the server default.
+    #[serde(default)]
+    pub instance_url: String,
     pub nonce: String,
     pub exp: i64,
     pub iat: i64,
@@ -27,12 +33,25 @@ pub fn issue_oauth_state(
     workspace_id: Uuid,
     provider: &str,
 ) -> AppResult<String> {
+    issue_oauth_state_named(secret, user_id, workspace_id, provider, None, None)
+}
+
+pub fn issue_oauth_state_named(
+    secret: &str,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    provider: &str,
+    display_name: Option<&str>,
+    instance_url: Option<&str>,
+) -> AppResult<String> {
     let now = Utc::now();
     let exp = now + ChronoDuration::minutes(STATE_TTL_MINUTES);
     let claims = OAuthStateClaims {
         sub: user_id.to_string(),
         workspace_id: workspace_id.to_string(),
         provider: provider.to_string(),
+        display_name: display_name.unwrap_or("").trim().to_string(),
+        instance_url: instance_url.unwrap_or("").trim().trim_end_matches('/').to_string(),
         nonce: Uuid::now_v7().to_string(),
         exp: exp.timestamp(),
         iat: now.timestamp(),
@@ -109,6 +128,8 @@ mod tests {
                 sub: Uuid::now_v7().to_string(),
                 workspace_id: Uuid::now_v7().to_string(),
                 provider: "github".into(),
+                display_name: String::new(),
+                instance_url: String::new(),
                 nonce: "n".into(),
                 exp: now - 120,
                 iat: now - 180,
@@ -171,6 +192,8 @@ mod tests {
                     sub: Uuid::now_v7().to_string(),
                     workspace_id: Uuid::now_v7().to_string(),
                     provider: "github".into(),
+                    display_name: String::new(),
+                    instance_url: String::new(),
                     nonce: nonce.into(),
                     exp: now + 600,
                     iat: now,

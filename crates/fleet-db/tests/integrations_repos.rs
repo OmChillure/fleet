@@ -68,6 +68,7 @@ async fn upsert_github(
             id: Uuid::now_v7(),
             workspace_id,
             provider: "github".into(),
+            display_name: None,
             account_label: Some("acct".into()),
             config: json!({ "site": "github.com" }),
             credentials,
@@ -132,6 +133,7 @@ async fn disconnect_one_provider_leaves_other_provider_same_workspace_intact() {
             id: Uuid::now_v7(),
             workspace_id: ws_a,
             provider: "gitlab".into(),
+            display_name: None,
             account_label: Some("acct".into()),
             config: json!({ "site": "gitlab.com" }),
             credentials: leftover_gitlab.clone(),
@@ -278,6 +280,7 @@ async fn list_for_workspace_includes_github_error_with_installation_id() {
             id: Uuid::now_v7(),
             workspace_id: ws_a,
             provider: "slack".into(),
+            display_name: None,
             account_label: Some("slack".into()),
             config: json!({}),
             credentials: leftover_ciphertext("slk"),
@@ -390,6 +393,7 @@ async fn patch_agent_defaults_writes_keys_on_connected_and_leaves_credentials() 
             id: Uuid::now_v7(),
             workspace_id,
             provider: "github".into(),
+            display_name: None,
             account_label: Some("acct".into()),
             config: json!({ "site": "github.com", "extra": "keep-me" }),
             credentials: credentials.clone(),
@@ -455,4 +459,63 @@ async fn patch_agent_defaults_writes_keys_on_connected_and_leaves_credentials() 
     .await
     .expect("count integration_connections");
     assert_eq!(count, 1, "patch must not INSERT a connections row");
+}
+
+#[tokio::test]
+async fn two_named_connections_for_one_provider_stay_separate() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    for (name, token) in [("Work", "aaaa"), ("Personal", "bbbb")] {
+        integrations::upsert(
+            &pool,
+            &UpsertConnection {
+                id: Uuid::now_v7(),
+                workspace_id,
+                provider: "slack".into(),
+                display_name: Some(name.into()),
+                account_label: Some(name.into()),
+                config: json!({}),
+                credentials: leftover_ciphertext(token),
+                connected_by: Some(user_id),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .expect("upsert named slack");
+    }
+
+    let rows = integrations::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list");
+    let names: Vec<_> = rows
+        .iter()
+        .filter(|r| r.provider == "slack")
+        .map(|r| r.display_name.as_str())
+        .collect();
+    assert_eq!(names, vec!["Personal", "Work"]);
+
+    let work = rows.iter().find(|r| r.display_name == "Work").unwrap();
+    let renamed = integrations::rename_connection(&pool, workspace_id, work.id, "Office")
+        .await
+        .expect("rename");
+    assert_eq!(renamed.display_name, "Office");
+
+    assert!(
+        integrations::disconnect_by_id(&pool, workspace_id, work.id)
+            .await
+            .expect("disconnect one")
+    );
+    let left = integrations::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list after");
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].display_name, "Personal");
+
+    let categories = integrations::list_categories(&pool).await.expect("categories");
+    assert!(categories.iter().any(|c| c.id == "chat" && c.label == "Chat"));
+    let mapped = integrations::list_provider_categories(&pool)
+        .await
+        .expect("provider categories");
+    assert!(mapped.iter().any(|row| row.provider == "slack" && row.category_id == "chat"));
+    assert!(mapped.iter().any(|row| row.provider == "github" && row.label == "Source control"));
 }

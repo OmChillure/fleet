@@ -11,6 +11,8 @@ pub struct IntegrationConnection {
     pub provider: String,
     pub status: String,
     pub account_label: Option<String>,
+    /// User-chosen name. Empty is the legacy single connection for this provider.
+    pub display_name: String,
     pub config: Value,
     /// Secret tokens — never put this on a public API type.
     pub credentials: Value,
@@ -29,6 +31,8 @@ pub struct IntegrationConnectionPublic {
     pub provider: String,
     pub status: String,
     pub account_label: Option<String>,
+    #[serde(default)]
+    pub display_name: String,
     pub config: Value,
     pub connected: bool,
     pub last_error: Option<String>,
@@ -79,6 +83,7 @@ impl From<&IntegrationConnection> for IntegrationConnectionPublic {
             provider: c.provider.clone(),
             status: c.status.clone(),
             account_label: c.account_label.clone(),
+            display_name: c.display_name.clone(),
             config: c.config.clone(),
             connected: c.status == "connected",
             last_error: c.last_error.clone(),

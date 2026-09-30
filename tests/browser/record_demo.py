@@ -797,7 +797,7 @@ class Demo:
                 self.bug("Observe still enabled after cancel")
 
     def scene_inbox(self) -> None:
-        from inbox_e2e_helpers import seed_open_ticket
+        from inbox_e2e_helpers import seed_connected_github, seed_open_ticket
 
         base = self.ensure_session()
         p = self.page
@@ -824,11 +824,20 @@ class Demo:
                 self.bug("Start monitor neither enabled nor explained connect-first")
         gh = p.get_by_role("link", name="GitHub", exact=True)
         if gh.count() == 0:
-            raise RuntimeError("Inbox missing GitHub in the nav or cards")
-        gh.first.click()
+            # Unconnected apps stay off the sidebar. The provider URL explains that.
+            p.goto(f"{base}/inbox/github", wait_until="networkidle")
+        else:
+            gh.first.click()
         pause(p, 800)
         if "GitHub automation" not in p.inner_text("body"):
-            raise RuntimeError("GitHub inbox missing automation board")
+            if "Nothing is connected" not in p.inner_text("body"):
+                raise RuntimeError("GitHub inbox missing automation board")
+            seed_connected_github(ws)
+            p.goto(f"{base}/inbox/github", wait_until="networkidle")
+            try:
+                p.get_by_text("GitHub automation", exact=False).first.wait_for(timeout=15_000)
+            except Exception as e:
+                raise RuntimeError("GitHub inbox missing automation board") from e
         body = p.inner_text("body")
         if "{provider}" in body:
             raise RuntimeError("GitHub webhook still has {provider} in the URL")
@@ -936,36 +945,45 @@ class Demo:
             self.bug("Integrations missing search")
             self.snap("catalog")
             return
-        search.first.fill("git")
+        search.first.fill("GitHub")
         pause(p, 800)
         self.snap("search-git")
         git_body = p.inner_text("body")
         if "GitHub" not in git_body and "github" not in git_body.lower():
-            self.bug("search git did not show GitHub")
-        connect = p.get_by_role("button", name="Connect", exact=True)
-        if connect.count():
-            # Click Connect — do not complete OAuth. A popup, a same-tab
-            # redirect, or an on-page waiting state is the feature.
-            try:
-                with p.expect_popup(timeout=4000) as pop:
-                    with self.expect_http(
-                        "GET",
-                        "/oauth/start",
-                        status=("200", "302", "303", "307", "400"),
-                    ):
-                        connect.first.click()
-                popup = pop.value
-                pause(popup, 800)
-                self.snap("connect-popup")
-                popup.close()
-            except Exception:
-                pause(p, 1000)
-            if "/oauth" in p.url or "authorize" in p.url.lower():
-                self.snap("oauth-redirect")
-                p.goto(f"{base}/integrations", wait_until="networkidle")
-                pause(p, 600)
+            self.bug("search GitHub did not show GitHub")
+        add = p.get_by_role("button", name="Add", exact=True)
+        if add.count() == 0:
+            self.bug("Integrations missing Add")
+        else:
+            add.first.click()
+            pause(p, 400)
+            self.snap("add-modal")
+            dialog = p.get_by_role("heading", name="Add GitHub")
+            if dialog.count() == 0:
+                self.bug("Add did not open the name dialog")
             else:
-                self.snap("after-connect-click")
+                p.get_by_placeholder("Work, Personal, …").fill("Demo GitHub")
+                cont = p.get_by_role("button", name="Continue", exact=True)
+                try:
+                    with p.expect_popup(timeout=4000) as pop:
+                        with self.expect_http(
+                            "GET",
+                            "/oauth/start",
+                            status=("200", "302", "303", "307", "400"),
+                        ):
+                            cont.click()
+                    popup = pop.value
+                    pause(popup, 800)
+                    self.snap("connect-popup")
+                    popup.close()
+                except Exception:
+                    pause(p, 1000)
+                if "/oauth" in p.url or "authorize" in p.url.lower():
+                    self.snap("oauth-redirect")
+                    p.goto(f"{base}/integrations", wait_until="networkidle")
+                    pause(p, 600)
+                else:
+                    self.snap("after-connect-click")
         search = p.locator("input[type='search'], input[placeholder*='Search' i]")
         if search.count():
             search.first.fill("asana")

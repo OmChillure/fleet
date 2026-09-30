@@ -8,8 +8,7 @@ use super::catalog::{explain_error, hook_url_for, inbox_app};
 use super::shared::{apply_rows, PageData};
 use super::views;
 use crate::pages::integrations::{
-    find_integration, integration_is_connected, integration_needs_reconnect, list_integrations,
-    message_is_auth_failure,
+    find_integration, list_integrations, live_connections, message_is_auth_failure,
 };
 use crate::Route;
 
@@ -32,19 +31,124 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
 }
 
 #[component]
-pub fn InboxApp(workspace_id: String, provider: String) -> Element {
-    let key = format!("{workspace_id}:{provider}");
+pub fn InboxConnection(
+    workspace_id: String,
+    provider: String,
+    connection_id: String,
+) -> Element {
+    let key = format!("{workspace_id}:{provider}:{connection_id}");
     rsx! {
-        InboxAppBody { key: "{key}", workspace_id, provider }
+        InboxAppBody {
+            key: "{key}",
+            workspace_id,
+            provider,
+            connection_id,
+        }
     }
 }
 
 #[component]
-fn InboxAppBody(workspace_id: String, provider: String) -> Element {
+pub fn InboxApp(workspace_id: String, provider: String) -> Element {
+    let key = format!("{workspace_id}:{provider}");
+    rsx! {
+        InboxProviderGate { key: "{key}", workspace_id, provider }
+    }
+}
+
+#[component]
+fn InboxProviderGate(workspace_id: String, provider: String) -> Element {
+    let mut choices = use_signal(Vec::<(String, String, bool)>::new);
+    let mut ready = use_signal(|| false);
+    let nav = use_navigator();
+    let ws = workspace_id.clone();
+    let prov = provider.clone();
+    use_future(move || {
+        let ws = ws.clone();
+        let prov = prov.clone();
+        async move {
+            if let Ok(list) = list_integrations(&ws).await {
+                if let Some(integ) = find_integration(&list, &prov) {
+                    let rows: Vec<_> = live_connections(integ)
+                        .into_iter()
+                        .map(|c| {
+                            let failed = c.status.eq_ignore_ascii_case("error");
+                            let title = if c.display_name.trim().is_empty() {
+                                integ.name.clone()
+                            } else {
+                                c.display_name.clone()
+                            };
+                            (c.id, title, failed)
+                        })
+                        .collect();
+                    if rows.len() == 1 {
+                        nav.replace(Route::InboxConnection {
+                            workspace_id: ws,
+                            provider: prov,
+                            connection_id: rows[0].0.clone(),
+                        });
+                        return;
+                    }
+                    choices.set(rows);
+                }
+            }
+            ready.set(true);
+        }
+    });
+    if !ready() {
+        return rsx! { p { class: "p-5 text-sm text-[var(--app-muted)]", "Loading…" } };
+    }
+    rsx! {
+        div { class: "mx-auto flex max-w-xl flex-col gap-3 p-5",
+            h1 { class: "m-0 text-xl font-bold text-[var(--app-fg)]", "Choose a connection" }
+            p { class: "m-0 text-sm text-[var(--app-muted)]",
+                "This service has more than one account. Open the named one."
+            }
+            if choices().is_empty() {
+                p { class: "m-0 text-sm text-[var(--app-muted)]", "Nothing is connected for this service." }
+            }
+            for (id, title, failed) in choices() {
+                {
+                    let tone = if failed {
+                        "border-red-500/50 text-red-200"
+                    } else {
+                        "border-[var(--app-border)] text-[var(--app-fg)]"
+                    };
+                    rsx! {
+                        Link {
+                            key: "{id}",
+                            to: Route::InboxConnection {
+                                workspace_id: workspace_id.clone(),
+                                provider: provider.clone(),
+                                connection_id: id,
+                            },
+                            class: "rounded-xl border px-4 py-3 text-sm no-underline {tone}",
+                            "{title}"
+                            if failed { " — sign-in failed" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn InboxAppBody(workspace_id: String, provider: String, connection_id: String) -> Element {
+    // The router reuses this page when only the connection id changes.
+    // Read the live route so the second Gitea is not stuck on the first.
+    let route = use_route::<crate::Route>();
+    let (workspace_id, provider, connection_id) = match route {
+        crate::Route::InboxConnection {
+            workspace_id,
+            provider,
+            connection_id,
+        } => (workspace_id, provider, connection_id),
+        _ => (workspace_id, provider, connection_id),
+    };
     let provider = provider.trim().to_ascii_lowercase();
     let info = inbox_app(&provider);
 
-    let rows = use_signal(Vec::<TicketRow>::new);
+    let mut rows = use_signal(Vec::<TicketRow>::new);
     let mut filter = use_signal(String::new);
     let mut status_line = use_signal(|| "Loading…".to_string());
     let mut last_error = use_signal(|| None::<String>);
@@ -52,49 +156,60 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
     let mut connected = use_signal(|| false);
     let mut auth_failed = use_signal(|| false);
     let mut account = use_signal(String::new);
+    let mut connection_title = use_signal(String::new);
+    let mut bound_connection = use_signal(|| connection_id.clone());
+    let mut bound_provider = use_signal(|| provider.clone());
     let mut allowed = use_signal(Vec::<String>::new);
     let mut auto_launch = use_signal(|| false);
     let busy = use_signal(|| false);
     let finish_error = use_signal(|| None::<(String, String)>);
     let mut seeded = use_signal(|| false);
 
+    if bound_connection() != connection_id || bound_provider() != provider {
+        bound_connection.set(connection_id.clone());
+        bound_provider.set(provider.clone());
+        connection_title.set(String::new());
+        auth_failed.set(false);
+        connected.set(false);
+        account.set(String::new());
+        allowed.set(Vec::new());
+        rows.set(Vec::new());
+        seeded.set(false);
+        status_line.set("Loading…".to_string());
+        last_error.set(None);
+    }
+
     let ws_conn = workspace_id.clone();
-    let prov_conn = provider.clone();
     use_future(move || {
         let ws = ws_conn.clone();
-        let prov = prov_conn.clone();
         async move {
             loop {
+                let prov = bound_provider();
                 match list_integrations(&ws).await {
                     Ok(list) => {
                         if let Some(i) = find_integration(&list, &prov) {
-                            let failed = integration_needs_reconnect(i);
-                            auth_failed.set(failed);
-                            let on = integration_is_connected(i);
-                            connected.set(on);
-                            if on {
-                                account.set(
-                                    i.connection
-                                        .as_ref()
-                                        .and_then(|c| c.account_label.clone())
-                                        .unwrap_or_default(),
-                                );
-                            } else if !failed {
-                                account.set(String::new());
+                            let wanted = bound_connection();
+                            let picked = live_connections(i)
+                                .into_iter()
+                                .find(|c| c.id == wanted);
+                            if let Some(conn) = picked {
+                                let failed = conn.status.eq_ignore_ascii_case("error");
+                                auth_failed.set(failed);
+                                connected.set(!failed && (conn.connected || conn.status.eq_ignore_ascii_case("connected")));
+                                account.set(conn.account_label.clone().unwrap_or_default());
+                                connection_title.set(if conn.display_name.trim().is_empty() {
+                                    i.name.clone()
+                                } else {
+                                    conn.display_name.clone()
+                                });
+                                allowed.set(crate::pages::integrations::granted_repos(&conn));
                             } else {
-                                account.set(
-                                    i.connection
-                                        .as_ref()
-                                        .and_then(|c| c.account_label.clone())
-                                        .unwrap_or_default(),
-                                );
+                                connected.set(false);
+                                auth_failed.set(false);
+                                account.set(String::new());
+                                connection_title.set(String::new());
+                                allowed.set(Vec::new());
                             }
-                            allowed.set(
-                                i.connection
-                                    .as_ref()
-                                    .map(crate::pages::integrations::granted_repos)
-                                    .unwrap_or_default(),
-                            );
                         } else {
                             connected.set(false);
                             auth_failed.set(false);
@@ -109,13 +224,43 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
         }
     });
 
+    let ws_now = workspace_id.clone();
+    use_effect(move || {
+        let id = bound_connection();
+        let prov = bound_provider();
+        let ws = ws_now.clone();
+        spawn(async move {
+            let Ok(list) = list_integrations(&ws).await else {
+                return;
+            };
+            if bound_connection() != id {
+                return;
+            }
+            let Some(i) = find_integration(&list, &prov) else {
+                return;
+            };
+            let Some(conn) = live_connections(i).into_iter().find(|c| c.id == id) else {
+                return;
+            };
+            let failed = conn.status.eq_ignore_ascii_case("error");
+            auth_failed.set(failed);
+            connected.set(!failed && (conn.connected || conn.status.eq_ignore_ascii_case("connected")));
+            account.set(conn.account_label.clone().unwrap_or_default());
+            connection_title.set(if conn.display_name.trim().is_empty() {
+                i.name.clone()
+            } else {
+                conn.display_name.clone()
+            });
+            allowed.set(crate::pages::integrations::granted_repos(&conn));
+        });
+    });
+
     let ws_list = workspace_id.clone();
-    let prov_list = provider.clone();
     use_future(move || {
         let ws = ws_list.clone();
-        let prov = prov_list.clone();
         async move {
             loop {
+                let prov = bound_provider();
                 match list_inbox(&ws).await {
                     Ok(resp) => {
                         if let Some(m) = resp.monitor.as_ref() {
@@ -155,6 +300,8 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
                                     auto_launch,
                                     busy,
                                     finish_error,
+                                    connection_id: bound_connection,
+                                    connection_title,
                                 },
                             );
                         }
@@ -195,6 +342,8 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
         auto_launch,
         busy,
         finish_error,
+        connection_id: bound_connection,
+        connection_title,
     };
     views::render(&workspace_id, info, data)
 }

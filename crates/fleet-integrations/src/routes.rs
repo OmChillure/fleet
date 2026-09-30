@@ -20,7 +20,8 @@ use crate::models::{
     DisconnectResponse, IntegrationAvailability, IntegrationListResponse, IntegrationView,
 };
 use crate::oauth::{
-    authorize_url, convert_manifest, exchange_code, github_install_url, issue_oauth_state,
+    authorize_url, authorize_url_at, convert_manifest, exchange_code_at, github_install_url,
+    issue_oauth_state_named,
     manifest_form_html, verify_oauth_state, OAuthCallbackError,
 };
 use crate::proxy::{ProxyCaller, ProxyRequest};
@@ -61,6 +62,10 @@ where
             "/api/workspaces/{workspace_id}/integrations/{provider}",
             axum::routing::delete(disconnect_integration).patch(patch_integration_defaults),
         )
+        .route(
+            "/api/workspaces/{workspace_id}/integrations/{provider}/connections/{connection_id}",
+            axum::routing::delete(disconnect_connection).patch(rename_connection),
+        )
 }
 
 async fn require_workspace_member(
@@ -83,6 +88,9 @@ struct GogsConnectBody {
     /// Instance root, such as `http://localhost:3034`. Empty falls back to `GOGS_BASE_URL`.
     #[serde(default)]
     base_url: Option<String>,
+    /// Connection title. Empty keeps the legacy unnamed Gogs row.
+    #[serde(default)]
+    display_name: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -239,6 +247,7 @@ async fn connect_gogs(
             workspace_id,
             provider: "gogs".into(),
             account_label: Some(account_label.clone()),
+            display_name: Some(clean_connection_name(&body.display_name)),
             config: serde_json::json!({ "provider": "gogs", "base_url": base }),
             credentials: sealed,
             connected_by: Some(user.id),
@@ -282,26 +291,41 @@ fn enrich_views(
     workspace_id: Uuid,
     connections: &[fleet_db::IntegrationConnection],
     workspace_app_providers: &std::collections::HashSet<String>,
+    categories: &std::collections::HashMap<String, (String, String)>,
     state: &IntegrationsState,
 ) -> Vec<IntegrationView> {
-    let by_provider: std::collections::HashMap<&str, &fleet_db::IntegrationConnection> =
-        connections
-            .iter()
-            .map(|c| (c.provider.as_str(), c))
-            .collect();
+    let mut by_provider: std::collections::HashMap<&str, Vec<&fleet_db::IntegrationConnection>> =
+        std::collections::HashMap::new();
+    for conn in connections {
+        by_provider
+            .entry(conn.provider.as_str())
+            .or_default()
+            .push(conn);
+    }
 
     catalog::catalog()
         .into_iter()
         .map(|mut view| {
+            if let Some((id, label)) = categories.get(&view.id) {
+                view.category_id = id.clone();
+                view.category_label = label.clone();
+            }
             let configured = state.config.is_oauth_configured(&view.id)
                 || workspace_app_providers.contains(&view.id);
             view.oauth_configured = configured;
             view.oauth_callback_url = Some(state.config.callback_url(&view.id));
             view.oauth_app_create_url = oauth_app_create_url(&view.id).map(str::to_string);
             view.oauth_start_path = catalog::oauth_start_path(workspace_id, &view.id);
-            if let Some(conn) = by_provider.get(view.id.as_str()) {
-                view.connected = conn.status == "connected";
-                view.connection = Some(IntegrationConnectionPublic::from(*conn));
+            if let Some(rows) = by_provider.get(view.id.as_str()) {
+                view.connections = rows
+                    .iter()
+                    .map(|c| IntegrationConnectionPublic::from(*c))
+                    .collect();
+                view.connected = rows.iter().any(|c| c.status == "connected");
+                view.connection = rows
+                    .iter()
+                    .max_by_key(|c| c.updated_at)
+                    .map(|c| IntegrationConnectionPublic::from(*c));
             }
             view
         })
@@ -352,9 +376,30 @@ async fn list_integrations(
     let connections = integ_repo::list_for_workspace(&state.db, workspace_id).await?;
     let apps = integ_repo::list_oauth_apps(&state.db, workspace_id).await?;
     let workspace_app_providers = apps.into_iter().map(|a| a.provider).collect();
+    let category_rows = integ_repo::list_categories(&state.db).await?;
+    let provider_categories = integ_repo::list_provider_categories(&state.db).await?;
+    let categories = provider_categories
+        .into_iter()
+        .map(|row| (row.provider, (row.category_id, row.label)))
+        .collect();
     Ok(Json(IntegrationListResponse {
         workspace_id: workspace_id.to_string(),
-        integrations: enrich_views(workspace_id, &connections, &workspace_app_providers, &state),
+        categories: category_rows
+            .into_iter()
+            .map(|row| crate::models::IntegrationCategoryView {
+                id: row.id,
+                label: row.label,
+                subtitle: row.subtitle,
+                sort_order: row.sort_order,
+            })
+            .collect(),
+        integrations: enrich_views(
+            workspace_id,
+            &connections,
+            &workspace_app_providers,
+            &categories,
+            &state,
+        ),
     }))
 }
 
@@ -422,19 +467,51 @@ async fn put_oauth_app(
 /// If Fleet does not yet have an OAuth app:
 /// - GitHub: land on github.com via App Manifest (create + install + authorize)
 /// - others (Jira, …): one-time in-tab form, then 302 to the provider login
+#[derive(Debug, Default, Deserialize)]
+struct OauthNameQuery {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    url: String,
+}
+
+fn clean_instance_url(raw: &str) -> String {
+    let url = raw.trim().trim_end_matches('/');
+    if url.chars().count() > 200 {
+        url.chars().take(200).collect()
+    } else {
+        url.to_string()
+    }
+}
+
+fn clean_connection_name(raw: &str) -> String {
+    let name = raw.trim();
+    if name.chars().count() > 80 {
+        name.chars().take(80).collect()
+    } else {
+        name.to_string()
+    }
+}
+
 async fn oauth_start(
     State(state): State<IntegrationsState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
     Path((workspace_id, provider)): Path<(Uuid, String)>,
+    Query(query): Query<OauthNameQuery>,
 ) -> AppResult<Response> {
     reject_cross_site_oauth_nav(&headers)?;
     let (user, _) = require_workspace_member(&state, &jar, workspace_id).await?;
     let provider = provider.trim().to_lowercase();
     let entry = require_available_provider(&provider)?;
+    let connection_name = clean_connection_name(&query.name);
+    let instance_url = clean_instance_url(&query.url);
 
     if let Some(client) = resolve_oauth_client(&state, workspace_id, &provider).await? {
-        if provider == "github" && github_installation_present(&state, workspace_id).await {
+        if connection_name.is_empty()
+            && provider == "github"
+            && github_installation_present(&state, workspace_id).await
+        {
             let revived = crate::proxy::invoke(
                 &state.db,
                 &state.config.credentials_key,
@@ -456,11 +533,27 @@ async fn oauth_start(
                 ));
             }
         }
-        return redirect_to_provider(&state.config, &user.id, workspace_id, &provider, &client);
+        return redirect_to_provider(
+            &state.config,
+            &user.id,
+            workspace_id,
+            &provider,
+            &client,
+            &connection_name,
+            &instance_url,
+        );
     }
 
     // Env + workspace app unset: still start Connect (must not 500).
-    oauth_start_unconfigured(&state.config, user.id, workspace_id, &provider, &entry)
+    oauth_start_unconfigured(
+        &state.config,
+        user.id,
+        workspace_id,
+        &provider,
+        &entry,
+        &connection_name,
+        &instance_url,
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,7 +597,15 @@ async fn oauth_start_with_app(
         client_secret,
         github_app_slug: None,
     };
-    redirect_to_provider(&state.config, &user.id, workspace_id, &provider, &client)
+    redirect_to_provider(
+        &state.config,
+        &user.id,
+        workspace_id,
+        &provider,
+        &client,
+        "",
+        "",
+    )
 }
 
 fn require_available_provider(provider: &str) -> AppResult<crate::models::IntegrationView> {
@@ -526,8 +627,17 @@ fn oauth_start_unconfigured(
     workspace_id: Uuid,
     provider: &str,
     entry: &crate::models::IntegrationView,
+    connection_name: &str,
+    instance_url: &str,
 ) -> AppResult<Response> {
-    let oauth_state = issue_oauth_state(&config.state_secret, user_id, workspace_id, provider)?;
+    let oauth_state = issue_oauth_state_named(
+        &config.state_secret,
+        user_id,
+        workspace_id,
+        provider,
+        Some(connection_name),
+        Some(instance_url),
+    )?;
     if provider == "github" {
         tracing::info!(%workspace_id, user_id = %user_id, "oauth start github manifest");
         return Ok(html_page(manifest_form_html(
@@ -568,9 +678,18 @@ fn redirect_to_provider(
     workspace_id: Uuid,
     provider: &str,
     client: &OAuthClientConfig,
+    connection_name: &str,
+    instance_url: &str,
 ) -> AppResult<Response> {
-    let oauth_state = issue_oauth_state(&config.state_secret, *user_id, workspace_id, provider)?;
-    let url = authorize_url(provider, config, client, &oauth_state)?;
+    let oauth_state = issue_oauth_state_named(
+        &config.state_secret,
+        *user_id,
+        workspace_id,
+        provider,
+        Some(connection_name),
+        Some(instance_url),
+    )?;
+    let url = authorize_url_at(provider, config, client, &oauth_state, Some(instance_url))?;
     tracing::info!(
         %workspace_id,
         provider = %provider,
@@ -1150,7 +1269,13 @@ pub async fn oauth_callback_inner(
         )));
     }
 
-    let tokens = exchange_code(&provider, &state.config, &client, &code)
+    let tokens = exchange_code_at(
+        &provider,
+        &state.config,
+        &client,
+        &code,
+        Some(claims.instance_url.as_str()),
+    )
         .await
         .map_err(|e| OAuthCallbackError::from_app_error(e, Some(claims.workspace_id.clone())))?;
 
@@ -1185,6 +1310,7 @@ pub async fn oauth_callback_inner(
             id: Uuid::now_v7(),
             workspace_id,
             provider: provider.clone(),
+            display_name: Some(claims.display_name.clone()),
             account_label: tokens.account_label,
             config,
             credentials: sealed,
@@ -1286,6 +1412,51 @@ async fn disconnect_integration(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct RenameConnectionBody {
+    display_name: String,
+}
+
+/// `PATCH .../integrations/:provider/connections/:connection_id`
+async fn rename_connection(
+    State(state): State<IntegrationsState>,
+    jar: CookieJar,
+    Path((workspace_id, _provider, connection_id)): Path<(Uuid, String, Uuid)>,
+    Json(body): Json<RenameConnectionBody>,
+) -> AppResult<Json<IntegrationConnectionPublic>> {
+    let (user, ws) = require_workspace_member(&state, &jar, workspace_id).await?;
+    require_owner_or_admin(&ws)?;
+    let _ = user;
+    let row = integ_repo::rename_connection(&state.db, workspace_id, connection_id, &body.display_name)
+        .await?;
+    Ok(Json(IntegrationConnectionPublic::from(row)))
+}
+
+/// `DELETE .../integrations/:provider/connections/:connection_id`
+async fn disconnect_connection(
+    State(state): State<IntegrationsState>,
+    jar: CookieJar,
+    Path((workspace_id, provider, connection_id)): Path<(Uuid, String, Uuid)>,
+) -> AppResult<Json<DisconnectResponse>> {
+    let (user, ws) = require_workspace_member(&state, &jar, workspace_id).await?;
+    require_owner_or_admin(&ws)?;
+    let disconnected = integ_repo::disconnect_by_id(&state.db, workspace_id, connection_id).await?;
+    if !disconnected {
+        return Err(AppError::not_found("connection not found"));
+    }
+    tracing::info!(
+        %workspace_id,
+        provider = %provider,
+        %connection_id,
+        user_id = %user.id,
+        "integration connection disconnected"
+    );
+    Ok(Json(DisconnectResponse {
+        provider,
+        disconnected: true,
+    }))
+}
+
 #[cfg(test)]
 mod gogs_connect_tests {
     use super::*;
@@ -1341,6 +1512,7 @@ mod patch_agent_defaults_tests {
             provider: "github".into(),
             status: "connected".into(),
             account_label: Some("acct".into()),
+            display_name: String::new(),
             config: json!({
                 "default_runner_id": "runner-1",
                 "default_provider": "grok",
@@ -1458,7 +1630,7 @@ mod oauth_start_unconfigured_tests {
         workspace_id: Uuid,
         entry: &crate::models::IntegrationView,
     ) -> String {
-        let res = oauth_start_unconfigured(cfg, user_id, workspace_id, &entry.id, entry)
+        let res = oauth_start_unconfigured(cfg, user_id, workspace_id, &entry.id, entry, "", "")
             .unwrap_or_else(|e| {
                 panic!(
                     "available {} with unset client must not 500: {e:?}",
@@ -1555,7 +1727,7 @@ mod oauth_start_unconfigured_tests {
         });
         assert!(configured.is_oauth_configured("github"));
         let client = configured.github.clone().expect("github client just set");
-        let redirect = redirect_to_provider(&configured, &user_id, workspace_id, "github", &client)
+        let redirect = redirect_to_provider(&configured, &user_id, workspace_id, "github", &client, "", "")
             .expect("configured start redirects");
         assert!(
             redirect.status().is_redirection(),

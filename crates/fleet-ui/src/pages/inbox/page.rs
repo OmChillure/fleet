@@ -4,12 +4,21 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{InboxResponse, list_inbox, poll_inbox, start_monitor, stop_monitor};
-use super::catalog::{INBOX_APPS, InboxGroup};
+use super::catalog::INBOX_APPS;
 use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::integrations::{
-    IntegrationLogo, integration_is_connected, integration_needs_reconnect, list_integrations,
+    IntegrationLogo, live_connections, load_integrations, IntegrationCategory,
 };
+
+#[derive(Clone, PartialEq)]
+struct InboxEntry {
+    provider: String,
+    connection_id: String,
+    category_id: String,
+    name: String,
+    failed: bool,
+}
 
 fn ticket_count(resp: &InboxResponse, provider: &str) -> usize {
     resp.tickets
@@ -22,8 +31,8 @@ fn ticket_count(resp: &InboxResponse, provider: &str) -> usize {
 pub fn Inbox(workspace_id: String) -> Element {
     let mut status_line = use_signal(|| "Loading inbox…".to_string());
     let mut counts = use_signal(std::collections::BTreeMap::<String, usize>::new);
-    let mut connected = use_signal(std::collections::BTreeSet::<String>::new);
-    let mut auth_failed = use_signal(std::collections::BTreeSet::<String>::new);
+    let mut connections = use_signal(Vec::<InboxEntry>::new);
+    let mut categories = use_signal(Vec::<IntegrationCategory>::new);
     let mut monitor_on = use_signal(|| false);
     let mut busy = use_signal(|| false);
 
@@ -33,8 +42,7 @@ pub fn Inbox(workspace_id: String) -> Element {
         async move {
             loop {
                 let mut next_counts = std::collections::BTreeMap::new();
-                let mut next_conn = std::collections::BTreeSet::new();
-                let mut next_failed = std::collections::BTreeSet::new();
+                let mut next_conn = Vec::new();
                 match list_inbox(&ws).await {
                     Ok(resp) => {
                         monitor_on.set(resp.monitor.as_ref().is_some_and(|m| m.enabled));
@@ -51,18 +59,37 @@ pub fn Inbox(workspace_id: String) -> Element {
                     }
                     Err(e) => status_line.set(e.message()),
                 }
-                if let Ok(list) = list_integrations(&ws).await {
-                    for i in list {
-                        if integration_needs_reconnect(&i) {
-                            next_failed.insert(i.id.to_ascii_lowercase());
-                        } else if integration_is_connected(&i) {
-                            next_conn.insert(i.id.to_ascii_lowercase());
+                if let Ok(snapshot) = load_integrations(&ws).await {
+                    categories.set(snapshot.categories);
+                    for i in snapshot.integrations {
+                        let provider = i.id.to_ascii_lowercase();
+                        if !INBOX_APPS.iter().any(|a| a.id == provider) {
+                            continue;
+                        }
+                        for conn in live_connections(&i) {
+                            let failed = conn.status.eq_ignore_ascii_case("error");
+                            let on = !failed
+                                && (conn.connected || conn.status.eq_ignore_ascii_case("connected"));
+                            if !on && !failed {
+                                continue;
+                            }
+                            let name = if conn.display_name.trim().is_empty() {
+                                i.name.clone()
+                            } else {
+                                conn.display_name.clone()
+                            };
+                            next_conn.push(InboxEntry {
+                                provider: provider.clone(),
+                                connection_id: conn.id.clone(),
+                                category_id: i.category_id.clone(),
+                                name,
+                                failed,
+                            });
                         }
                     }
                 }
                 counts.set(next_counts);
-                connected.set(next_conn);
-                auth_failed.set(next_failed);
+                connections.set(next_conn);
                 TimeoutFuture::new(8000).await;
             }
         }
@@ -145,52 +172,87 @@ pub fn Inbox(workspace_id: String) -> Element {
                 }
             }
             p { class: "m-0 text-xs text-[var(--app-muted)]",
-                "Start monitor checks connected apps on a schedule. Refresh now checks once. Open an app to connect it and finish setup there — Slack is channels, GitHub is issues."
+                "Start monitor checks connected apps on a schedule. Refresh now checks once. Connect another account from Integrations."
+            }
+            if connections().is_empty() {
+                p { class: "m-0 text-sm text-[var(--app-muted)]",
+                    "No connected apps yet. "
+                    Link {
+                        to: Route::Integrations { workspace_id: workspace_id.clone() },
+                        class: "text-[var(--app-fg)] underline",
+                        "Add one in Integrations"
+                    }
+                }
             }
 
-            for group in InboxGroup::ALL {
+            for group in categories() {
                 {
-                    let mut apps: Vec<_> = INBOX_APPS.iter().filter(|a| a.group == group).collect();
-                    apps.sort_by_key(|a| (!connected().contains(a.id), a.name.to_ascii_lowercase()));
-                    rsx! {
-                        section { key: "{group.title()}",
-                            h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                                "{group.title()}"
-                            }
-                            p { class: "mt-1 mb-3 text-xs text-[var(--app-muted)]",
-                                "{group.subtitle()}"
-                            }
-                            ul { class: "m-0 grid list-none gap-3 p-0 sm:grid-cols-2",
-                                for app in apps {
-                                    {
-                                        let failed = auth_failed().contains(app.id);
-                                        let on = connected().contains(app.id) && !failed;
-                                        let n = *counts().get(app.id).unwrap_or(&0);
-                                        rsx! {
-                                            li { key: "{app.id}",
-                                                Link {
-                                                    to: Route::InboxApp {
-                                                        workspace_id: workspace_id.clone(),
-                                                        provider: app.id.to_string(),
-                                                    },
-                                                    class: "flex h-full items-start gap-3 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 text-inherit no-underline hover:bg-[var(--app-bg-hover)]",
-                                                    IntegrationLogo { icon: app.id.to_string(), name: app.name.to_string() }
-                                                    div { class: "min-w-0",
-                                                        p { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                                                            "{app.name}"
-                                                        }
-                                                        p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]",
-                                                            if failed {
-                                                                "Sign-in failed"
-                                                            } else if on {
-                                                                "Connected"
-                                                            } else {
-                                                                "Not connected"
+                    let rows: Vec<_> = connections()
+                        .into_iter()
+                        .filter(|c| c.category_id == group.id)
+                        .collect();
+                    if rows.is_empty() {
+                        rsx! { div { key: "{group.id}" } }
+                    } else {
+                        rsx! {
+                            section { key: "{group.id}",
+                                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                                    "{group.label}"
+                                }
+                                p { class: "mt-1 mb-3 text-xs text-[var(--app-muted)]",
+                                    "{group.subtitle}"
+                                }
+                                ul { class: "m-0 grid list-none gap-3 p-0 sm:grid-cols-2",
+                                    for row in rows {
+                                        {
+                                            let app = INBOX_APPS.iter().find(|a| a.id == row.provider);
+                                            let n = *counts().get(row.provider.as_str()).unwrap_or(&0);
+                                            let title = row.name.clone();
+                                            let provider = row.provider.clone();
+                                            let connection_id = row.connection_id.clone();
+                                            let failed = row.failed;
+                                            let border = if failed {
+                                                "border-red-500/60"
+                                            } else {
+                                                "border-[var(--app-border)]"
+                                            };
+                                            rsx! {
+                                                li { key: "{connection_id}",
+                                                    div { class: "flex h-full flex-col gap-2 rounded-2xl border bg-[var(--app-bg-elevated)] p-4 {border}",
+                                                        Link {
+                                                            to: Route::InboxConnection {
+                                                                workspace_id: workspace_id.clone(),
+                                                                provider: provider.clone(),
+                                                                connection_id: connection_id.clone(),
+                                                            },
+                                                            class: "flex items-start gap-3 text-inherit no-underline hover:opacity-90",
+                                                            IntegrationLogo {
+                                                                icon: provider.clone(),
+                                                                name: app.map(|a| a.name.to_string()).unwrap_or_else(|| provider.clone()),
                                                             }
-                                                            if n > 0 { " · {n} open" }
+                                                            div { class: "min-w-0",
+                                                                p { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                                                                    "{title}"
+                                                                }
+                                                                p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]",
+                                                                    if failed { "Sign-in failed" } else { "Connected" }
+                                                                    if n > 0 { " · {n} open" }
+                                                                }
+                                                                if let Some(app) = app {
+                                                                    p { class: "m-0 mt-1 text-xs text-[var(--app-muted)]",
+                                                                        "{app.outcome}"
+                                                                    }
+                                                                }
+                                                            }
                                                         }
-                                                        p { class: "m-0 mt-1 text-xs text-[var(--app-muted)]",
-                                                            "{app.outcome}"
+                                                        Link {
+                                                            to: Route::ConnectionEdit {
+                                                                workspace_id: workspace_id.clone(),
+                                                                provider: provider.clone(),
+                                                                connection_id,
+                                                            },
+                                                            class: "text-xs text-[var(--app-accent)] underline",
+                                                            "Manage"
                                                         }
                                                     }
                                                 }

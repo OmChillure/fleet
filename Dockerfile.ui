@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
            /app/target/dx; \
        fi \
     && mkdir -p /app/target \
-    && grep -q 'Reconnect' crates/fleet-ui/src/pages/integrations/page.rs \
+    && grep -q 'Reconnect' crates/fleet-ui/src/pages/integrations/connection.rs \
     && mkdir -p crates/fleet-ui/public \
     && printf '%s\n' "${FLEET_GIT_SHA}" > crates/fleet-ui/public/fleet-git-sha.txt \
     && CARGO_PROFILE_RELEASE_DEBUG=0 dx build --package fleet-ui --release --platform web \

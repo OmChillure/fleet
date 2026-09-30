@@ -1319,6 +1319,7 @@ async fn reconnect_rewrites_legacy_plaintext_credentials_as_envelope() {
             id: Uuid::now_v7(),
             workspace_id: ws_a,
             provider: "trello".into(),
+            display_name: None,
             account_label: Some("legacy".into()),
             config: serde_json::json!({}),
             credentials: serde_json::json!({ "access_token": tok_legacy_plain }),
