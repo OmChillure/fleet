@@ -20,7 +20,7 @@ pub fn IntegrationLogo(icon: String, name: String) -> Element {
             class: "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl {tile_class}",
             if let Some(src) = logo {
                 img {
-                    class: if icon == "gitea" { "h-10 w-10 object-contain" } else { "h-5 w-5 object-contain" },
+                    class: if icon == "gitea" || icon == "gogs" { "h-10 w-10 object-contain" } else { "h-5 w-5 object-contain" },
                     src: "{src}",
                     alt: "{name}",
                     width: "20",
@@ -59,6 +59,10 @@ fn logo_for(icon: &str) -> (&'static str, Option<Asset>) {
         "gitea" => (
             "bg-transparent",
             Some(asset!("/assets/integrations/gitea.svg")),
+        ),
+        "gogs" => (
+            "bg-transparent",
+            Some(asset!("/assets/integrations/gogs.svg")),
         ),
         "bitbucket" => (
             "bg-[#0052CC]",

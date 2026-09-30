@@ -24,6 +24,7 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
         "notion" => m.notion_databases.join(", "),
         "gitlab" => m.gitlab_projects.join(", "),
         "gitea" => m.gitea_repos.join(", "),
+        "gogs" => m.gogs_repos.join(", "),
         "linear" => m.linear_teams.join(", "),
         "trello" => m.trello_boards.join(", "),
         _ => String::new(),

@@ -7,6 +7,7 @@ mod bitbucket;
 mod confluence;
 mod gitea;
 mod github;
+mod gogs;
 mod gitlab;
 mod jira;
 mod linear;
@@ -23,6 +24,7 @@ pub fn render(ws: &str, info: &'static InboxAppInfo, data: PageData) -> Element 
         "github" => github::view(ws, data),
         "gitlab" => gitlab::view(ws, data),
         "gitea" => gitea::view(ws, data),
+        "gogs" => gogs::view(ws, data),
         "bitbucket" => bitbucket::view(ws, data),
         "jira" => jira::view(ws, data),
         "linear" => linear::view(ws, data),

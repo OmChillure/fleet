@@ -269,6 +269,46 @@ pub async fn patch_integration_defaults(
     Ok(())
 }
 
+/// Gogs has no OAuth app. The server turns this login into an API token.
+pub async fn connect_gogs(
+    workspace_id: &str,
+    base_url: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), IntegrationsError> {
+    let path = format!("/api/workspaces/{workspace_id}/integrations/gogs/connect");
+    let send = || {
+        with_credentials(
+            client()
+                .post(api_url(&path))
+                .json(&json!({
+                    "base_url": base_url,
+                    "username": username,
+                    "password": password
+                })),
+        )
+        .send()
+    };
+    let first = send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    let res = if first.status().as_u16() == 401 {
+        refresh_session()
+            .await
+            .map_err(|e| IntegrationsError::Message(e.message()))?;
+        send()
+            .await
+            .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?
+    } else {
+        first
+    };
+    if res.status().is_success() {
+        return Ok(());
+    }
+    parse_json_or_error::<ErrorBody>(res).await?;
+    Ok(())
+}
+
 /// `DELETE /api/workspaces/{id}/integrations/{provider}`
 pub async fn disconnect_integration(
     workspace_id: &str,

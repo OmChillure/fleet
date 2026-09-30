@@ -42,6 +42,10 @@ where
             axum::routing::put(put_oauth_app),
         )
         .route(
+            "/api/workspaces/{workspace_id}/integrations/gogs/connect",
+            axum::routing::post(connect_gogs),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start",
             get(oauth_start).post(oauth_start_with_app),
         )
@@ -70,6 +74,184 @@ async fn require_workspace_member(
         .await?
         .ok_or_else(|| AppError::forbidden("not a member of this workspace"))?;
     Ok((user, ws))
+}
+
+#[derive(Debug, Deserialize)]
+struct GogsConnectBody {
+    username: String,
+    password: String,
+    /// Instance root, such as `http://localhost:3034`. Empty falls back to `GOGS_BASE_URL`.
+    #[serde(default)]
+    base_url: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GogsConnectResponse {
+    provider: String,
+    connected: bool,
+    account_label: String,
+}
+
+fn gogs_login_ok<'a>(username: &'a str, password: &'a str) -> AppResult<(&'a str, &'a str)> {
+    let username = username.trim();
+    let password = password.trim();
+    if username.is_empty() || password.is_empty() {
+        return Err(AppError::bad_request("username and password are required"));
+    }
+    let ok = username.len() <= 40
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !ok {
+        return Err(AppError::bad_request(
+            "username has characters Gogs will not accept",
+        ));
+    }
+    Ok((username, password))
+}
+
+/// Instance root only: `http://host:3034`, no user, path, query, or fragment.
+fn gogs_instance_url(raw: &str) -> AppResult<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(AppError::bad_request("Gogs URL is required"));
+    }
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return Err(AppError::bad_request(
+            "Gogs URL must be an http(s) address, like http://localhost:3034",
+        ));
+    };
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(AppError::bad_request(
+            "Gogs URL must start with http:// or https://",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AppError::bad_request(
+            "Put the Gogs login in the username and password fields",
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(AppError::bad_request("Gogs URL must include a host"));
+    }
+    let path = url.path().trim_end_matches('/');
+    if !path.is_empty() || url.query().is_some() || url.fragment().is_some() {
+        return Err(AppError::bad_request(
+            "Gogs URL should be the instance root, like http://localhost:3034",
+        ));
+    }
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn gogs_access_token(body: &serde_json::Value) -> Result<String, String> {
+    body.get("sha1")
+        .or_else(|| body.get("token"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Gogs did not return an access token".into())
+}
+
+fn gogs_account_label(body: &serde_json::Value, fallback: &str) -> String {
+    body.get("username")
+        .or_else(|| body.get("login"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+/// Gogs does not offer OAuth applications. Exchange the user's login for an
+/// API token and store that token the same way other forges store OAuth.
+async fn connect_gogs(
+    State(state): State<IntegrationsState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<GogsConnectBody>,
+) -> AppResult<Json<GogsConnectResponse>> {
+    let (user, ws) = require_workspace_member(&state, &jar, workspace_id).await?;
+    require_owner_or_admin(&ws)?;
+    let (username, password) = gogs_login_ok(&body.username, &body.password)?;
+    let supplied = body
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let base = gogs_instance_url(supplied.unwrap_or(state.config.gogs_base_url.as_str()))?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| AppError::internal(format!("http client: {e}")))?;
+    let token_url = format!("{base}/api/v1/users/{username}/tokens");
+    let token_name = format!("agent-fleet-{}", Utc::now().timestamp());
+    let created = http
+        .post(&token_url)
+        .basic_auth(username, Some(password))
+        .json(&serde_json::json!({ "name": token_name }))
+        .send()
+        .await
+        .map_err(|e| AppError::bad_request(format!("Gogs did not answer at {base}: {e}")))?;
+    let status = created.status();
+    let created_body: serde_json::Value = created.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() {
+        let msg = created_body
+            .get("message")
+            .or_else(|| created_body.get("error"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Gogs rejected that username or password");
+        return Err(AppError::bad_request(format!(
+            "Gogs login failed ({status}): {msg}"
+        )));
+    }
+    let access_token = gogs_access_token(&created_body)
+        .map_err(|e| AppError::bad_request(e))?;
+    let profile = http
+        .get(format!("{base}/api/v1/user"))
+        .header("Authorization", format!("token {access_token}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok();
+    let profile_body = match profile {
+        Some(res) => res.json().await.unwrap_or(serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+    let account_label = gogs_account_label(&profile_body, username);
+    let credentials = serde_json::json!({
+        "access_token": access_token,
+        "token_type": "token",
+    });
+    let sealed = state
+        .config
+        .credentials_key
+        .encrypt(&credentials)
+        .map_err(|e| AppError::internal(format!("failed to encrypt credentials: {e}")))?;
+    integ_repo::upsert(
+        &state.db,
+        &UpsertConnection {
+            id: Uuid::now_v7(),
+            workspace_id,
+            provider: "gogs".into(),
+            account_label: Some(account_label.clone()),
+            config: serde_json::json!({ "provider": "gogs", "base_url": base }),
+            credentials: sealed,
+            connected_by: Some(user.id),
+            at: Utc::now(),
+        },
+    )
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    Ok(Json(GogsConnectResponse {
+        provider: "gogs".into(),
+        connected: true,
+        account_label,
+    }))
 }
 
 fn require_owner_or_admin(ws: &fleet_db::WorkspaceWithRole) -> AppResult<()> {
@@ -1105,6 +1287,45 @@ async fn disconnect_integration(
 }
 
 #[cfg(test)]
+mod gogs_connect_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn login_rejects_blank_and_slash() {
+        assert!(gogs_login_ok("  ", "x").is_err());
+        assert!(gogs_login_ok("fleet", "  ").is_err());
+        assert!(gogs_login_ok("a/b", "secret").is_err());
+        assert_eq!(gogs_login_ok(" fleet ", " pw ").unwrap(), ("fleet", "pw"));
+    }
+
+    #[test]
+    fn token_reads_sha1_and_username() {
+        assert_eq!(gogs_access_token(&json!({"sha1": "abc"})).unwrap(), "abc");
+        assert!(gogs_access_token(&json!({})).is_err());
+        assert_eq!(gogs_account_label(&json!({"username": "fleet"}), "x"), "fleet");
+        assert_eq!(gogs_account_label(&json!({}), "fleet"), "fleet");
+    }
+
+    #[test]
+    fn instance_url_keeps_the_root_and_rejects_a_page() {
+        assert_eq!(
+            gogs_instance_url(" http://localhost:3034/ ").unwrap(),
+            "http://localhost:3034"
+        );
+        assert_eq!(
+            gogs_instance_url("https://gogs.example.com:3000").unwrap(),
+            "https://gogs.example.com:3000"
+        );
+        assert!(gogs_instance_url("").is_err());
+        assert!(gogs_instance_url("gogs.local").is_err());
+        assert!(gogs_instance_url("ftp://gogs.local").is_err());
+        assert!(gogs_instance_url("http://user:pw@localhost:3034").is_err());
+        assert!(gogs_instance_url("http://localhost:3034/user/login").is_err());
+    }
+}
+
+#[cfg(test)]
 mod patch_agent_defaults_tests {
     use super::*;
     use fleet_db::{IntegrationAgentDefaults, IntegrationConnection, IntegrationConnectionPublic};
@@ -1193,6 +1414,7 @@ mod oauth_start_unconfigured_tests {
             gitlab: None,
             gitea: None,
             gitea_base_url: "http://localhost:3033".into(),
+            gogs_base_url: "http://localhost:3034".into(),
             slack: None,
             linear: None,
             jira: None,
@@ -1466,6 +1688,7 @@ mod token_paste_tests {
             gitlab: None,
             gitea: None,
             gitea_base_url: "http://localhost:3033".into(),
+            gogs_base_url: "http://localhost:3034".into(),
             slack: None,
             linear: None,
             jira: None,

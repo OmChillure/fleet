@@ -270,6 +270,7 @@ async fn http_instance(State(state): State<AppState>, jar: CookieJar) -> AppResu
         "github": state.integrations.github.is_some(),
         "gitlab": state.integrations.gitlab.is_some(),
         "gitea": state.integrations.gitea.is_some(),
+        "gogs": !state.integrations.gogs_base_url.trim().is_empty(),
         "slack": state.integrations.slack.is_some(),
         "linear": state.integrations.linear.is_some(),
         "jira": state.integrations.jira.is_some(),

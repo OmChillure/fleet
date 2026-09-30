@@ -592,6 +592,21 @@ mod tests {
                     "add_comment",
                 ],
             ),
+            (
+                "gogs",
+                &[
+                    "list_repos",
+                    "list_issues",
+                    "get_issue",
+                    "get_file",
+                    "list_commits",
+                    "put_file",
+                    "commit_files",
+                    "create_issue",
+                    "update_issue",
+                    "add_comment",
+                ],
+            ),
             ("jira", &["get_issue", "create_issue"]),
             (
                 "linear",

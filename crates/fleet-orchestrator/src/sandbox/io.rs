@@ -151,7 +151,7 @@ pub fn default_output_for_ref(ext: &ExternalRef, summary: &str) -> Option<PlanIo
                 args: json!({ "project": project, "iid": iid, "body": summary }),
             })
         }
-        "gitea" => {
+        "gitea" | "gogs" => {
             let (owner, repo, number) = parse_owner_repo_num(key)?;
             Some(PlanIo {
                 provider,

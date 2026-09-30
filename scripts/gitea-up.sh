@@ -18,7 +18,7 @@ DEV_PASS="${GITEA_DEV_PASS:-DevPass123456}"
 DEV_EMAIL="${GITEA_DEV_EMAIL:-dev@example.com}"
 REDIRECT="${GITEA_OAUTH_REDIRECT:-http://localhost:8080/api/integrations/oauth/callback/gitea}"
 
-docker compose up -d gitea
+docker compose --profile gitea up -d gitea
 echo "waiting for $BASE"
 ready=0
 for _ in $(seq 1 60); do

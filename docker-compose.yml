@@ -3,6 +3,9 @@
 #   docker compose up -d postgres          # DB only — does not need FLEET_GIT_SHA
 #   FLEET_GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build
 #
+# Gitea and Gogs are test-only. They are not started by `docker compose up`
+# and do not restart with Docker. Use scripts/gitea-up.sh or scripts/gogs-up.sh.
+#
 #   API:  http://localhost:8080
 #   UI:   http://localhost:3030   (nginx; /api proxied to API)
 #   DB:   postgres://fleet:fleet@localhost:5433/fleet
@@ -65,6 +68,7 @@ services:
       GITEA_BASE_URL: ${GITEA_BASE_URL:-http://host.docker.internal:3033}
       GITEA_CLIENT_ID: ${GITEA_CLIENT_ID:-}
       GITEA_CLIENT_SECRET: ${GITEA_CLIENT_SECRET:-}
+      GOGS_BASE_URL: ${GOGS_BASE_URL:-http://host.docker.internal:3034}
       RUST_LOG: info,sqlx=warn,tower_http=info
       # ADMIN_TOKEN: dev-admin-token-change-me
     volumes:
@@ -129,6 +133,8 @@ services:
       disable: true
 
   gitea:
+    profiles: ["gitea"]
+    restart: "no"
     image: gitea/gitea:1.27.3
     ports:
       - "3033:3000"
@@ -148,8 +154,21 @@ services:
     volumes:
       - gitea_data:/data
 
+  gogs:
+    profiles: ["gogs"]
+    restart: "no"
+    image: gogs/gogs:0.14.3
+    ports:
+      - "3034:3000"
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+    volumes:
+      - gogs_data:/data
+
 volumes:
   fleet_pg:
   fleet_data:
   fleet_host:
   gitea_data:
+  gogs_data:

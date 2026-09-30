@@ -26,13 +26,21 @@ Prefer **`http://localhost:3030`** in the browser (not `127.0.0.1`) so cookie au
 
 ---
 
-## Local Gitea (integration tests)
+## Local Gitea and Gogs (optional)
+
+`docker compose up` does not start these. They do not restart with Docker. Run the script when you want a local instance.
 
 ```bash
 scripts/gitea-up.sh
 ```
 
 That starts Gitea at `http://localhost:3033`, creates users `fleet` and `dev`, org `worms` with repos `game` and `docs`, and one open issue. The access token and OAuth client land in `.tmp/gitea.env`. Point Fleet at it with `GITEA_BASE_URL`, `GITEA_CLIENT_ID`, and `GITEA_CLIENT_SECRET` from that file, then Connect **Gitea** on the integrations page.
+
+```bash
+scripts/gogs-up.sh
+```
+
+That starts Gogs at `http://localhost:3034` with the same users, org, repos, and issue. Gogs has no OAuth app, so Connect **Gogs** asks for the instance URL, username, and password. Fleet stores an API token for that URL. The form starts at `http://localhost:3034`; leave `GOGS_BASE_URL` set when the API runs in Compose (`http://host.docker.internal:3034`) so an empty URL still has a fallback.
 
 ## One command: full stack in Docker
 
