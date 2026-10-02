@@ -42,7 +42,6 @@ pub fn start_fixture_body() -> Value {
     })
 }
 
-
 async fn parse(res: reqwest::Response) -> Result<Value, FleetError> {
     let status = res.status();
     let text = res

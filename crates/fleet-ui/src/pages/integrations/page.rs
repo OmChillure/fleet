@@ -3,13 +3,13 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    connect_gogs, integration_is_connected, list_integrations, live_connections, load_integrations,
-    oauth_start_url_setup, patch_integration_defaults, Integration, IntegrationCategory,
+    Integration, IntegrationCategory, connect_gogs, integration_is_connected, list_integrations,
+    live_connections, load_integrations, oauth_start_url_setup, patch_integration_defaults,
 };
 use super::logos::IntegrationLogo;
+use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::inbox::is_inbox_app;
-use crate::Route;
 
 /// How long we poll for a completed OAuth before giving up (~3 min).
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
@@ -28,9 +28,9 @@ struct OauthBridgeMsg {
 mod oauth_bridge {
     use super::OauthBridgeMsg;
     use std::cell::RefCell;
+    use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::prelude::*;
-    use wasm_bindgen::JsCast;
 
     thread_local! {
         static PENDING: RefCell<Option<OauthBridgeMsg>> = const { RefCell::new(None) };
@@ -632,7 +632,7 @@ fn AddCard(
 
 #[component]
 fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
-    use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
+    use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
     use fleet_runners_view::{display_name, is_removed};
 
     let mut hosts = use_signal(Vec::<HostPublic>::new);

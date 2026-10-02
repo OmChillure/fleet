@@ -9,10 +9,10 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
-    parse_worker_host_run_mode, parse_worker_host_send_policy, HostCpSettings, NewWorkerHost,
-    WorkerHost, WorkerHostPairToken, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
-    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING,
+    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
+    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost,
+    WorkerHostPairToken, normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
+    parse_worker_host_run_mode, parse_worker_host_send_policy,
 };
 use crate::pool::map_query_err;
 

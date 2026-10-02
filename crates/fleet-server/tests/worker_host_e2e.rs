@@ -8,17 +8,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, Request, StatusCode};
-use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
-use fleet_db::{connect_and_migrate_with, PoolConfig};
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
+use fleet_db::{PoolConfig, connect_and_migrate_with};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    build_http_app, AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app,
 };
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1018,10 +1019,7 @@ async fn complete_ok_false_is_spawn_failure_not_success() {
     let done = call_bearer(
         &app,
         "POST",
-        &format!(
-            "/api/worker-hosts/me/lease/{}/complete",
-            planted.claim_id
-        ),
+        &format!("/api/worker-hosts/me/lease/{}/complete", planted.claim_id),
         &planted.machine,
         Some(json!({
             "lease_token": planted.lease_token,
@@ -1033,7 +1031,12 @@ async fn complete_ok_false_is_spawn_failure_not_success() {
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
 
     let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
-    assert_eq!(sessions.status, StatusCode::OK, "sessions: {}", sessions.body);
+    assert_eq!(
+        sessions.status,
+        StatusCode::OK,
+        "sessions: {}",
+        sessions.body
+    );
     let sess = session_in(&sessions.body, planted.session_id);
     assert_eq!(
         sess["status"], "failed_spawn",
@@ -1058,7 +1061,11 @@ async fn complete_ok_false_is_spawn_failure_not_success() {
         "attempt 1 must retry_wait, not done_failed/ready: {}",
         task.status
     );
-    assert_eq!(task.attempt, 1, "first assign is attempt 1, got {}", task.attempt);
+    assert_eq!(
+        task.attempt, 1,
+        "first assign is attempt 1, got {}",
+        task.attempt
+    );
 }
 
 /// max_retries=0 (attempt already at cap): ok=false is done_failed / spawn_failed.
@@ -1079,10 +1086,7 @@ async fn complete_ok_false_exhausted_retries_is_done_failed() {
     let done = call_bearer(
         &app,
         "POST",
-        &format!(
-            "/api/worker-hosts/me/lease/{}/complete",
-            planted.claim_id
-        ),
+        &format!("/api/worker-hosts/me/lease/{}/complete", planted.claim_id),
         &planted.machine,
         Some(json!({
             "lease_token": planted.lease_token,
@@ -1123,10 +1127,7 @@ async fn complete_ok_false_rejects_later_job_token_heartbeat() {
     let done = call_bearer(
         &app,
         "POST",
-        &format!(
-            "/api/worker-hosts/me/lease/{}/complete",
-            planted.claim_id
-        ),
+        &format!("/api/worker-hosts/me/lease/{}/complete", planted.claim_id),
         &planted.machine,
         Some(json!({
             "lease_token": planted.lease_token,
@@ -1140,10 +1141,7 @@ async fn complete_ok_false_rejects_later_job_token_heartbeat() {
     let hb = call_bearer(
         &app,
         "POST",
-        &format!(
-            "/v1/projects/{ws}/workers/{}/heartbeat",
-            planted.session_id
-        ),
+        &format!("/v1/projects/{ws}/workers/{}/heartbeat", planted.session_id),
         &planted.worker_token,
         Some(json!({ "seq": 1, "progress_pct": 5 })),
     )

@@ -1,10 +1,10 @@
 //! Cloud page: attach Fleet Cloud or BYO AWS/GCP/Azure (sandboxed pair).
 
+use crate::components::toast::show_toast;
+use crate::pages::auth::api::{auth_base_url, with_credentials};
 use dioxus::prelude::*;
 use fleet_runners_view::placeholders::{CLOUD_CARDS, COMING_SOON_BADGE, CloudCardCopy};
 use fleet_runners_view::routes::NAV_LABEL_CLOUD;
-use crate::components::toast::show_toast;
-use crate::pages::auth::api::{auth_base_url, with_credentials};
 
 /// One Cloud card as this page renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

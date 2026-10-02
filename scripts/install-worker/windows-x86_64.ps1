@@ -48,6 +48,12 @@ function Get-PairedControlPlane([string]$Dir) {
 # Same URL trim as fleet-host refuse_url_switch. y/yes switches; anything else keeps the old pair.
 function Confirm-UnpairAndPair([string]$Old, [string]$New) {
     if ($env:FLEET_PAIR_FORCE -eq "1") { return $true }
+    $redirected = $true
+    try { $redirected = [Console]::IsInputRedirected } catch { $redirected = $true }
+    if ($redirected) {
+        Write-Host "already paired to $Old; this install is $New. Re-run in a terminal or set FLEET_PAIR_FORCE=1 to unpair and pair to $New"
+        return $false
+    }
     Write-Host "This machine is already paired to $Old."
     Write-Host "Pair to $New instead? That unpairs the old control plane and rotates the machine token."
     $ans = Read-Host "Unpair and pair to $New? [y/N]"
@@ -407,6 +413,11 @@ if ($pairToken) {
     $pairArgs = @("pair", "--url", $Origin, "--token", $pairToken)
     if ($alreadyPaired -and $existingUrl -and ($existingUrl -ne $wantUrl)) {
         if (-not (Confirm-UnpairAndPair $existingUrl $wantUrl)) {
+            $keptExe = Join-Path $BinDir "fleet-host.exe"
+            if (Test-Path -LiteralPath $keptExe) {
+                Start-Process -FilePath $keptExe -ArgumentList "run" -WindowStyle Hidden
+                Write-Host "kept existing pair; started fleet-host"
+            }
             throw "kept existing pair to $existingUrl"
         }
         $pairArgs += "--force"

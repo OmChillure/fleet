@@ -85,14 +85,7 @@ impl Toaster {
         next_id.set(id.wrapping_add(1));
 
         let mut list = items();
-        list = merge_toast(
-            list,
-            ToastItem {
-                id,
-                kind,
-                message,
-            },
-        );
+        list = merge_toast(list, ToastItem { id, kind, message });
         items.set(list);
 
         spawn(async move {

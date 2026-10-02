@@ -150,7 +150,10 @@ confirm_unpair_and_pair() {
     if [ "${FLEET_PAIR_FORCE:-}" = 1 ]; then
         return 0
     fi
+    # Stop already ran so the new bins could replace the old inode.
+    # A refused switch must start that unit again; die alone leaves it down.
     if [ ! -t 0 ]; then
+        start_host_service || true
         die "already paired to $_old; this install is $_new. Re-run in a terminal or set FLEET_PAIR_FORCE=1 to unpair and pair to $_new"
     fi
     info "This machine is already paired to $_old."
@@ -159,7 +162,10 @@ confirm_unpair_and_pair() {
     read -r _ans || _ans=
     case $_ans in
         y|Y|yes|YES) return 0 ;;
-        *) die "kept existing pair to $_old" ;;
+        *)
+            start_host_service || true
+            die "kept existing pair to $_old"
+            ;;
     esac
 }
 
@@ -917,10 +923,18 @@ if [ -n "${FLEET_PAIR_TOKEN:-}" ]; then
         _pair_force=--force
     fi
     info "pairing with the control plane"
+    _pair_rc=0
     if [ -n "$_pair_force" ]; then
-        "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN" --force
+        "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN" --force || _pair_rc=$?
     else
-        "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN"
+        "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN" || _pair_rc=$?
+    fi
+    if [ "$_pair_rc" -ne 0 ]; then
+        if [ "$already_paired" = 1 ]; then
+            err "pair failed; restarting the previous fleet-host"
+            start_host_service || true
+        fi
+        exit "$_pair_rc"
     fi
     info "starting fleet-host (heartbeats; offline after 90s if this fails)"
     start_host_service || true

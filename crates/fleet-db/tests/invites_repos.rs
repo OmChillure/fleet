@@ -151,7 +151,10 @@ async fn revoke_invite_drops_from_list_open() {
     let open = workspaces::list_open_invites(&pool, ws)
         .await
         .expect("open");
-    assert!(open.is_empty(), "revoked invite must leave list_open: {open:?}");
+    assert!(
+        open.is_empty(),
+        "revoked invite must leave list_open: {open:?}"
+    );
     let got = workspaces::get_invite(&pool, ws, inv.id)
         .await
         .expect("get")
@@ -775,11 +778,12 @@ async fn accept_pending_invites_for_user_skips_expires_at_equal_now() {
         workspaces::accept_pending_invites_for_user(&pool, guest, &guest_email.to_lowercase(), now)
             .await
             .expect("accept pending");
-    assert_eq!(n, 0, "signup must skip an invite whose expires_at equals now");
     assert_eq!(
-        workspaces::user_role(&pool, ws, guest)
-            .await
-            .expect("role"),
+        n, 0,
+        "signup must skip an invite whose expires_at equals now"
+    );
+    assert_eq!(
+        workspaces::user_role(&pool, ws, guest).await.expect("role"),
         None,
         "expires_at == now must not grant membership"
     );

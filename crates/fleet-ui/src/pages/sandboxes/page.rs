@@ -3,10 +3,10 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{list_sandboxes, SandboxRow};
+use super::api::{SandboxRow, list_sandboxes};
 use super::shape::{
-    list_status_line, sandbox_card_model, EMPTY_HEADING, EMPTY_HINT, LOAD_ERROR, PAGE_HEADING,
-    PAGE_SUBTITLE,
+    EMPTY_HEADING, EMPTY_HINT, LOAD_ERROR, PAGE_HEADING, PAGE_SUBTITLE, list_status_line,
+    sandbox_card_model,
 };
 use crate::Route;
 

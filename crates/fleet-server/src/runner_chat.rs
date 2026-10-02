@@ -20,8 +20,34 @@ use crate::chat_tools::{
 use crate::state::AppState;
 
 const POLL: Duration = Duration::from_millis(400);
-const WAIT: Duration = Duration::from_secs(240);
+/// One official-CLI round. The host kills the process here. `WAIT` is longer
+/// so the result can be stored. The chat_turn lease (`chat_turn_lease_for`)
+/// is longer than both: the host reclaims expired leases on its 2s poll, and
+/// a 2-minute lease used to drop the row while `grok` was still running.
+pub const CHAT_CLI_TIMEOUT_S: u64 = 600;
+const WAIT_SLACK_S: u64 = 75;
+const WAIT: Duration = Duration::from_secs(CHAT_CLI_TIMEOUT_S + WAIT_SLACK_S);
 const OFFLINE_AFTER: TimeDelta = TimeDelta::seconds(90);
+
+/// Lease covers the CLI kill plus time to POST complete.
+pub fn chat_turn_lease_for(payload: &Value) -> TimeDelta {
+    let timeout_s = payload
+        .get("timeout_s")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(CHAT_CLI_TIMEOUT_S as i64)
+        .clamp(30, 600);
+    TimeDelta::seconds(timeout_s + 90)
+}
+
+pub fn chat_turn_deadline_message(provider: &str, host_name: &str, host_online: bool) -> String {
+    if host_online {
+        format!(
+            "{provider} on {host_name} did not finish the chat turn in time. fleet-host is online; the official CLI timed out or its job lease ended before it reported a result."
+        )
+    } else {
+        "runner did not finish the chat turn in time — is fleet-host from this tree running?".into()
+    }
+}
 
 pub fn runner_cli_provider(provider: &str) -> bool {
     matches!(
@@ -82,7 +108,7 @@ pub async fn run_on_runner(
         "model": model,
         "effort": effort,
         "prompt": prompt,
-        "timeout_s": 180,
+        "timeout_s": CHAT_CLI_TIMEOUT_S,
         "max_turns": max_turns,
     });
     work_claims::enqueue(
@@ -112,6 +138,7 @@ pub async fn run_on_runner(
         claim_id,
         model,
         progress,
+        host.id,
         &host.name,
         provider,
         conversation_id,
@@ -367,7 +394,7 @@ fn extract_json_object(text: &str) -> Option<Value> {
 
 /// `DELETE` revoke sets `status=disabled` and drops the machine token, but
 /// leaves `enabled=true` and a fresh `last_seen_at`. Chat must 400 on that
-/// leftover — not enqueue `chat_turn` and wait 240s.
+/// leftover — not enqueue `chat_turn` and wait out the CLI timeout.
 pub(crate) fn host_is_removed(host: &WorkerHost) -> bool {
     host.status == fleet_db::WORKER_HOST_STATUS_DISABLED
 }
@@ -426,7 +453,7 @@ fn ensure_online(host: &WorkerHost) -> AppResult<()> {
         )));
     }
     // Mid host-bin swap: /me/lease is claim:null; chat must 400 here instead
-    // of enqueue + 240s while the box has stopped polling.
+    // of enqueueing a turn the box will not poll.
     if host.software_updating {
         return Err(AppError::bad_request(format!(
             "runner `{}` is updating / not taking jobs (host is updating)",
@@ -434,7 +461,7 @@ fn ensure_online(host: &WorkerHost) -> AppResult<()> {
         )));
     }
     // v1 is host mode only. allow_host=false or advertised_host=false already
-    // makes /me/lease claim:null; chat must 400 here instead of enqueue + 240s.
+    // makes /me/lease claim:null; chat must 400 here instead of enqueueing.
     if !host.effective_host() {
         return Err(AppError::bad_request(format!(
             "runner `{}` is not taking / host jobs not allowed",
@@ -450,11 +477,30 @@ fn ensure_online(host: &WorkerHost) -> AppResult<()> {
     Ok(())
 }
 
+fn claim_progress(payload: &Value) -> String {
+    payload
+        .get("progress")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+async fn host_recently_seen(pool: &fleet_db::PgPool, host_id: Uuid) -> bool {
+    match fleet_db::repos::worker_hosts::get(pool, host_id).await {
+        Ok(Some(host)) => host
+            .last_seen_at
+            .is_some_and(|seen| Utc::now() - seen <= OFFLINE_AFTER),
+        _ => false,
+    }
+}
+
 async fn wait_for_result(
     pool: &fleet_db::PgPool,
     claim_id: Uuid,
     fallback_model: &str,
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+    host_id: Uuid,
     host_name: &str,
     provider: &str,
     _conversation_id: Option<Uuid>,
@@ -462,6 +508,7 @@ async fn wait_for_result(
     let deadline = tokio::time::Instant::now() + WAIT;
     let started = tokio::time::Instant::now();
     let mut last_tick = 0u64;
+    let mut last_progress = String::new();
     loop {
         let claim = work_claims::get(pool, claim_id)
             .await
@@ -477,22 +524,32 @@ async fn wait_for_result(
                     .unwrap_or_else(|| "runner chat turn failed".into()),
             ));
         }
+        let noted = claim_progress(&claim.payload);
+        if !noted.is_empty() && noted != last_progress {
+            last_progress = noted.clone();
+            emit(
+                progress,
+                ChatProgress::Status {
+                    text: noted.clone(),
+                },
+            )
+            .await;
+        }
         if tokio::time::Instant::now() >= deadline {
-            return Err(AppError::bad_request(
-                "runner did not finish the chat turn in time — is fleet-host from this tree running?"
-                    .to_string(),
-            ));
+            let online = host_recently_seen(pool, host_id).await;
+            return Err(AppError::bad_request(chat_turn_deadline_message(
+                provider, host_name, online,
+            )));
         }
         let secs = started.elapsed().as_secs();
         if secs >= 5 && secs / 5 > last_tick {
             last_tick = secs / 5;
-            emit(
-                progress,
-                ChatProgress::Status {
-                    text: format!("Running {provider} on {host_name}… {secs}s"),
-                },
-            )
-            .await;
+            let text = if last_progress.is_empty() {
+                format!("Running {provider} on {host_name}… {secs}s")
+            } else {
+                format!("{last_progress} · {secs}s")
+            };
+            emit(progress, ChatProgress::Status { text }).await;
         }
         tokio::time::sleep(POLL).await;
     }
@@ -722,5 +779,48 @@ mod tests {
 
         assert!(parse_runner_tool_calls("I'll read Slack and write Notion.").is_none());
         assert!(parse_runner_tool_calls(r#"{"name":"not_a_fleet_tool","arguments":{}}"#).is_none());
+    }
+
+    #[test]
+    fn chat_turn_lease_outlives_cli_timeout() {
+        let lease = chat_turn_lease_for(&json!({ "timeout_s": 600 }));
+        assert_eq!(
+            lease.num_seconds(),
+            690,
+            "lease must outlive the 600s CLI kill so complete still holds the token"
+        );
+        let from_default = chat_turn_lease_for(&json!({}));
+        assert_eq!(from_default.num_seconds(), 690);
+        let short = chat_turn_lease_for(&json!({ "timeout_s": 30 }));
+        assert_eq!(short.num_seconds(), 120);
+        let clamped = chat_turn_lease_for(&json!({ "timeout_s": 9_999 }));
+        assert_eq!(clamped.num_seconds(), 690);
+    }
+
+    #[test]
+    fn deadline_message_names_a_live_host() {
+        let offline = chat_turn_deadline_message("grok", "laptop", false);
+        assert!(
+            offline.contains("is fleet-host from this tree running?"),
+            "{offline}"
+        );
+        let online = chat_turn_deadline_message("grok", "laptop", true);
+        assert!(
+            online.contains("fleet-host is online"),
+            "a heartbeating host must not be described as down: {online}"
+        );
+        assert!(
+            !online.contains("is fleet-host from this tree running?"),
+            "{online}"
+        );
+    }
+
+    #[test]
+    fn claim_progress_reads_host_note() {
+        assert_eq!(
+            claim_progress(&json!({ "progress": " Using run_terminal_command… " })),
+            "Using run_terminal_command…"
+        );
+        assert_eq!(claim_progress(&json!({})), "");
     }
 }

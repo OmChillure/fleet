@@ -1,14 +1,12 @@
 //! Partners: lend a sandboxed host or borrow from the pool after disclaimer ack.
 
 use dioxus::prelude::*;
-use fleet_runners_view::placeholders::{
-    DISCLAIMER_DEFAULT_ACCEPTED, PARTNERS_TRUST_COPY,
-};
+use fleet_runners_view::placeholders::{DISCLAIMER_DEFAULT_ACCEPTED, PARTNERS_TRUST_COPY};
 use fleet_runners_view::routes::NAV_LABEL_PARTNERS;
 
 use super::api::{
-    borrow_partner_offer, fetch_disclaimer_ack, list_partner_offers, offer_partner_host,
-    post_disclaimer_ack, PartnerOffer,
+    PartnerOffer, borrow_partner_offer, fetch_disclaimer_ack, list_partner_offers,
+    offer_partner_host, post_disclaimer_ack,
 };
 use crate::components::toast::show_toast;
 use crate::pages::runners::self_hosted::api::list_workers_page;
@@ -21,8 +19,7 @@ fn btn_class() -> &'static str {
     "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-50"
 }
 
-const PARTNERS_SUBTITLE: &str =
-    "Run work on other people's unused capacity. Sandboxed hosts only.";
+const PARTNERS_SUBTITLE: &str = "Run work on other people's unused capacity. Sandboxed hosts only.";
 const PARTNERS_TRUST_HEADING: &str = "Trust";
 const PARTNERS_DISCLAIMER_HEADING: &str = "Disclaimer";
 const PARTNERS_DISCLAIMER_ACK_LABEL: &str =
@@ -33,7 +30,8 @@ const PARTNERS_PARTNER_HINT: &str =
 const PARTNERS_LEND_HEADING: &str = "Lend";
 const PARTNERS_LEND_UNAVAILABLE: &str =
     "Acknowledge the disclaimer to lend a sandboxed host or borrow from the pool.";
-const PARTNERS_LEND_READY: &str = "Offer one of this workspace's sandboxed hosts, or borrow an offer.";
+const PARTNERS_LEND_READY: &str =
+    "Offer one of this workspace's sandboxed hosts, or borrow an offer.";
 const LEND_CAPACITY_LABEL: &str = "Lend capacity";
 const BUY_CREDITS_LABEL: &str = "Buy credits";
 

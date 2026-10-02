@@ -71,7 +71,10 @@ fn parse_activity(items: &[Value]) -> Vec<ActivityRow> {
                 continue;
             }
         }
-        let seq = a.get("report_seq").and_then(|v| v.as_i64()).unwrap_or(i as i64);
+        let seq = a
+            .get("report_seq")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(i as i64);
         let idx = a.get("idx").and_then(|v| v.as_i64()).unwrap_or(0);
         out.push(ActivityRow {
             key: format!("{session_id}-{seq}-{idx}-{i}"),

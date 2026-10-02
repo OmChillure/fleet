@@ -193,7 +193,10 @@ mod tests {
         assert_eq!(repo, "acme/api");
         assert_eq!(num, "#42");
         let apps = super::super::catalog::INBOX_APPS;
-        assert_eq!(apps.iter().find(|a| a.id == "slack").unwrap().action, "Handle");
+        assert_eq!(
+            apps.iter().find(|a| a.id == "slack").unwrap().action,
+            "Handle"
+        );
         assert_eq!(
             apps.iter().find(|a| a.id == "github").unwrap().action,
             "Start run"

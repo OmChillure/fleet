@@ -28,10 +28,7 @@ fn assert_live_orch_bins(label: &str, src: &str) {
         "{label} must not name deleted orch test binaries:\n{src}"
     );
     for needle in LIVE_ORCH_INTEGRATION_BINS {
-        assert!(
-            src.contains(needle),
-            "{label} must run {needle}:\n{src}"
-        );
+        assert!(src.contains(needle), "{label} must run {needle}:\n{src}");
     }
 }
 

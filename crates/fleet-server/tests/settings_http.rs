@@ -494,7 +494,11 @@ async fn repo_posture_is_saved_and_envelope_defaults_wide() {
     )
     .await;
     assert_eq!(capped.status, StatusCode::OK, "{}", capped.body);
-    assert_eq!(capped.body["run_envelope"], "in_container", "{}", capped.body);
+    assert_eq!(
+        capped.body["run_envelope"], "in_container",
+        "{}",
+        capped.body
+    );
     assert_eq!(capped.body["egress_envelope"], "none", "{}", capped.body);
 
     let saved = call(
@@ -514,7 +518,11 @@ async fn repo_posture_is_saved_and_envelope_defaults_wide() {
 
     let listed = call(&app, "GET", &fleet(&ws, "/repo-postures"), Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    assert_eq!(listed.body["repos"][0]["repo"], "acme/app", "{}", listed.body);
+    assert_eq!(
+        listed.body["repos"][0]["repo"], "acme/app",
+        "{}",
+        listed.body
+    );
 }
 
 #[tokio::test]

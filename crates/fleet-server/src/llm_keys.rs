@@ -8,7 +8,7 @@ use axum_extra::extract::CookieJar;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::llm_keys;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -63,10 +63,7 @@ async fn http_create(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let user = require_owner(&state, &jar, workspace_id).await?;
     let provider = body.provider.trim().to_ascii_lowercase();
-    if !matches!(
-        provider.as_str(),
-        "grok" | "xai" | "claude" | "anthropic"
-    ) {
+    if !matches!(provider.as_str(), "grok" | "xai" | "claude" | "anthropic") {
         return Err(AppError::bad_request(
             "provider must be grok, xai, claude, or anthropic",
         ));

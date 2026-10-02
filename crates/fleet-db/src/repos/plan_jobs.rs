@@ -86,7 +86,11 @@ pub async fn list_for_workspace(
     .map_err(map_query_err)
 }
 
-pub async fn mark_planning(pool: &PgPool, workspace_id: Uuid, id: Uuid) -> DbResult<Option<PlanJob>> {
+pub async fn mark_planning(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<PlanJob>> {
     sqlx::query_as::<_, PlanJob>(
         r#"
         UPDATE plan_jobs

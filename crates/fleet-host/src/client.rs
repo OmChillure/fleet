@@ -244,6 +244,30 @@ impl HostClient {
         Ok(())
     }
 
+    /// Live CLI step (`Using run_terminal_command…`) while a chat_turn lease is held.
+    pub async fn note_progress(&self, claim_id: Uuid, lease_token: &str, text: &str) -> Result<()> {
+        let token = self.bearer()?;
+        let path = format!("/api/worker-hosts/me/lease/{claim_id}/progress");
+        let resp = self
+            .http
+            .post(self.url(&path))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "lease_token": lease_token,
+                "text": text,
+            }))
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))?;
+        reject_auth(resp.status())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("HTTP {status}: {}", body.trim());
+        }
+        Ok(())
+    }
+
     /// GET `{control_plane_url}/install/worker/bin/{platform}/{bin}` (or `.sha256`).
     /// Bins are only fetched from the paired origin. Missing sidecar is a hard fail.
     pub async fn fetch_install_bytes(&self, platform: &str, name: &str) -> Result<Vec<u8>> {

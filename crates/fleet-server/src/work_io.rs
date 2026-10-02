@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use fleet_db::PgPool;
-use fleet_integrations::proxy::ProxyCaller;
 use fleet_integrations::CredentialsKey;
+use fleet_integrations::proxy::ProxyCaller;
 use fleet_orchestrator::sandbox::io::{IntegrationInvoker, IntegrationResult};
 use serde_json::Value;
 use uuid::Uuid;

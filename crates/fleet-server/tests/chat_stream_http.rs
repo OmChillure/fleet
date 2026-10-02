@@ -15,8 +15,8 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GrokConfig, OllamaConfig, GeminiConfig, OpenaiConfig, ServerConfig, build_http_app,
-    build_router,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app, build_router,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -1060,11 +1060,7 @@ async fn plant_owner_conversation(app: &axum::Router, state: &AppState) -> Owner
     }
 }
 
-async fn invite_existing_member(
-    app: &axum::Router,
-    owner_jar: &CookieJar,
-    ws: &str,
-) -> CookieJar {
+async fn invite_existing_member(app: &axum::Router, owner_jar: &CookieJar, ws: &str) -> CookieJar {
     let (member_email, member_jar, _member_ws) = signup_and_login(app).await;
     let invited = call(
         app,
@@ -1081,8 +1077,7 @@ async fn invite_existing_member(
         invited.body
     );
     assert_eq!(
-        invited.body["added_existing_user"],
-        true,
+        invited.body["added_existing_user"], true,
         "invite of an existing user adds them immediately: {}",
         invited.body
     );
@@ -1675,10 +1670,7 @@ async fn chat_invalid_role_resume_does_not_append() {
         }),
     )
     .await;
-    assert_chat_role_rejected_stream_http(
-        &streamed,
-        "POST /chat/stream resume role=tool",
-    );
+    assert_chat_role_rejected_stream_http(&streamed, "POST /chat/stream resume role=tool");
 
     let got = call(
         &app,
@@ -2188,7 +2180,12 @@ async fn chat_stream_disabled_providers_fail_closed_quickly() {
         listed_conversation_count(&after.body),
         after.body
     );
-    assert_no_chat_turn(&state, ws_uuid, "disabled grok/ollama/openai/default stream").await;
+    assert_no_chat_turn(
+        &state,
+        ws_uuid,
+        "disabled grok/ollama/openai/default stream",
+    )
+    .await;
 }
 
 /// Same all-disabled fixture: POST /chat (not stream) grok|ollama|openai
@@ -2254,7 +2251,12 @@ async fn chat_complete_disabled_grok_ollama_openai_is_400_no_enqueue() {
         listed_conversation_count(&after.body),
         after.body
     );
-    assert_no_chat_turn(&state, ws_uuid, "disabled grok/ollama/openai/default complete").await;
+    assert_no_chat_turn(
+        &state,
+        ws_uuid,
+        "disabled grok/ollama/openai/default complete",
+    )
+    .await;
 }
 
 /// Pair an online runner, then POST /chat/stream grok|ollama|openai +
@@ -2309,7 +2311,12 @@ async fn chat_stream_disabled_providers_with_runner_id_still_400_no_enqueue() {
         listed_conversation_count(&after.body),
         after.body
     );
-    assert_no_chat_turn(&state, ws_uuid, "disabled grok/ollama/openai+runner_id stream").await;
+    assert_no_chat_turn(
+        &state,
+        ws_uuid,
+        "disabled grok/ollama/openai+runner_id stream",
+    )
+    .await;
 }
 
 /// POST /chat and /chat/stream reject empty / typo / ticket provider as HTTP
@@ -2328,8 +2335,7 @@ async fn chat_complete_and_stream_empty_typo_ticket_provider_is_400() {
             "provider": provider,
             "runner_id": runner_id,
         });
-        let complete =
-            call_timed(&app, "POST", &chat_path(&ws), &jar, Some(body.clone())).await;
+        let complete = call_timed(&app, "POST", &chat_path(&ws), &jar, Some(body.clone())).await;
         assert_eq!(
             complete.status,
             StatusCode::BAD_REQUEST,
@@ -2357,8 +2363,7 @@ async fn chat_complete_and_stream_empty_typo_ticket_provider_is_400() {
             stream.raw
         );
         assert!(
-            !stream.raw.contains("\"type\":\"done\"")
-                && !stream.raw.contains("\"type\": \"done\""),
+            !stream.raw.contains("\"type\":\"done\"") && !stream.raw.contains("\"type\": \"done\""),
             "POST /chat/stream provider={provider:?} must not stream a completed turn: {}",
             stream.raw
         );
@@ -2499,14 +2504,7 @@ async fn chat_status_complete_stream_unauthenticated_is_401() {
     let status = call_timed(&app, "GET", &status_path(&ws), &empty, None).await;
     assert_unauthenticated(&status, "GET /chat/status");
 
-    let complete = call_timed(
-        &app,
-        "POST",
-        &chat_path(&ws),
-        &empty,
-        Some(body.clone()),
-    )
-    .await;
+    let complete = call_timed(&app, "POST", &chat_path(&ws), &empty, Some(body.clone())).await;
     assert_unauthenticated(&complete, "POST /chat");
 
     let stream = call_timed(&app, "POST", &stream_path(&ws), &empty, Some(body)).await;
@@ -2538,13 +2536,12 @@ async fn chat_conversations_other_workspace_cookie_forbidden_no_insert() {
     .await;
     assert_membership_forbidden(&created, "POST /chat/conversations");
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM chat_conversations WHERE workspace_id = $1",
-    )
-    .bind(a_uuid)
-    .fetch_one(&state.db)
-    .await
-    .expect("count conversations");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_conversations WHERE workspace_id = $1")
+            .bind(a_uuid)
+            .fetch_one(&state.db)
+            .await
+            .expect("count conversations");
     assert_eq!(
         count, 0,
         "other-ws cookie must not INSERT chat_conversations on owner workspace"
@@ -3295,13 +3292,21 @@ async fn chat_at_job_cap_no_enqueue() {
         "heartbeat current_jobs=0: {}",
         hb_clear.body
     );
-    assert_eq!(hb_clear.body["host"]["current_jobs"], 0, "{}", hb_clear.body);
+    assert_eq!(
+        hb_clear.body["host"]["current_jobs"], 0,
+        "{}",
+        hb_clear.body
+    );
     assert_eq!(
         hb_clear.body["host"]["max_concurrent"], 1,
         "plane 1 must still win over advertised 8: {}",
         hb_clear.body
     );
-    assert_eq!(hb_clear.body["host"]["status"], "online", "{}", hb_clear.body);
+    assert_eq!(
+        hb_clear.body["host"]["status"], "online",
+        "{}",
+        hb_clear.body
+    );
 
     let live_body = json!({
         "messages": user_hi(),
@@ -3386,14 +3391,8 @@ async fn chat_updating_host_no_enqueue() {
     let (_email, jar, ws) = signup_and_login(&app).await;
     let ws_uuid = Uuid::parse_str(&ws).expect("ws");
     let tag = Uuid::new_v4();
-    let (hid, machine) = pair_and_heartbeat_machine(
-        &app,
-        &jar,
-        &ws,
-        &format!("updating-chat-{tag}"),
-        None,
-    )
-    .await;
+    let (hid, machine) =
+        pair_and_heartbeat_machine(&app, &jar, &ws, &format!("updating-chat-{tag}"), None).await;
 
     let hb = call_bearer(
         &app,
@@ -3604,8 +3603,14 @@ async fn chat_offline_runner_no_enqueue() {
     let (app, state) = app_with_plane_chat().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let ws_uuid = Uuid::parse_str(&ws).expect("ws");
-    let hid = pair_and_heartbeat(&app, &jar, &ws, &format!("offline-{}", Uuid::new_v4()), None)
-        .await;
+    let hid = pair_and_heartbeat(
+        &app,
+        &jar,
+        &ws,
+        &format!("offline-{}", Uuid::new_v4()),
+        None,
+    )
+    .await;
     backdate_last_seen_91s(&state, hid).await;
     let got = call(
         &app,
@@ -3615,7 +3620,12 @@ async fn chat_offline_runner_no_enqueue() {
         None,
     )
     .await;
-    assert_eq!(got.status, StatusCode::OK, "GET backdated host: {}", got.body);
+    assert_eq!(
+        got.status,
+        StatusCode::OK,
+        "GET backdated host: {}",
+        got.body
+    );
     assert_eq!(
         got.body["status"], "offline",
         "last_seen 91s ago must be public offline: {}",
@@ -3651,8 +3661,8 @@ async fn chat_paused_runner_no_enqueue() {
     let (app, state) = app_with_plane_chat().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let ws_uuid = Uuid::parse_str(&ws).expect("ws");
-    let hid = pair_and_heartbeat(&app, &jar, &ws, &format!("paused-{}", Uuid::new_v4()), None)
-        .await;
+    let hid =
+        pair_and_heartbeat(&app, &jar, &ws, &format!("paused-{}", Uuid::new_v4()), None).await;
     let paused = owner_patch_host(
         &app,
         &jar,
@@ -3698,15 +3708,8 @@ async fn chat_drain_runner_no_enqueue() {
     let (_email, jar, ws) = signup_and_login(&app).await;
     let ws_uuid = Uuid::parse_str(&ws).expect("ws");
     let hid = pair_and_heartbeat(&app, &jar, &ws, &format!("drain-{}", Uuid::new_v4()), None).await;
-    let drained = owner_patch_host(
-        &app,
-        &jar,
-        &ws,
-        hid,
-        json!({ "drain": true }),
-        "drain=true",
-    )
-    .await;
+    let drained =
+        owner_patch_host(&app, &jar, &ws, hid, json!({ "drain": true }), "drain=true").await;
     assert_eq!(drained.body["drain"], true, "{}", drained.body);
     assert_eq!(drained.body["paused"], false, "{}", drained.body);
     assert_eq!(drained.body["enabled"], true, "{}", drained.body);
@@ -3803,8 +3806,8 @@ async fn chat_online_runner_enqueues_chat_turn() {
     let (app, state) = app_with_plane_chat().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let ws_uuid = Uuid::parse_str(&ws).expect("ws");
-    let hid = pair_and_heartbeat(&app, &jar, &ws, &format!("online-{}", Uuid::new_v4()), None)
-        .await;
+    let hid =
+        pair_and_heartbeat(&app, &jar, &ws, &format!("online-{}", Uuid::new_v4()), None).await;
 
     let live_body = json!({
         "messages": user_hi(),
@@ -3968,12 +3971,7 @@ async fn chat_advertised_host_false_no_enqueue() {
         "heartbeat advertised_host=false: {}",
         hb.body
     );
-    assert_eq!(
-        hb.body["host"]["advertised_host"],
-        false,
-        "{}",
-        hb.body
-    );
+    assert_eq!(hb.body["host"]["advertised_host"], false, "{}", hb.body);
 
     let before = chat_turn_count(&state, ws_uuid).await;
     let body = json!({
@@ -4076,8 +4074,7 @@ async fn chat_effective_host_restored_enqueues_chat_turn() {
         hb_on.body
     );
     assert_eq!(
-        hb_on.body["host"]["advertised_host"],
-        true,
+        hb_on.body["host"]["advertised_host"], true,
         "{}",
         hb_on.body
     );

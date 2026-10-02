@@ -163,8 +163,7 @@ pub fn integration_is_connected(i: &Integration) -> bool {
 /// A saved login was rejected and no healthy connection remains.
 pub fn integration_needs_reconnect(i: &Integration) -> bool {
     let rows = live_connections(i);
-    !rows.is_empty()
-        && rows.iter().all(|c| c.status.eq_ignore_ascii_case("error"))
+    !rows.is_empty() && rows.iter().all(|c| c.status.eq_ignore_ascii_case("error"))
 }
 
 /// Inbox and proxy errors that mean the saved login should be replaced.
@@ -391,16 +390,12 @@ pub async fn connect_gogs(
 ) -> Result<(), IntegrationsError> {
     let path = format!("/api/workspaces/{workspace_id}/integrations/gogs/connect");
     let send = || {
-        with_credentials(
-            client()
-                .post(api_url(&path))
-                .json(&json!({
-                    "base_url": base_url,
-                    "username": username,
-                    "password": password,
-                    "display_name": display_name
-                })),
-        )
+        with_credentials(client().post(api_url(&path)).json(&json!({
+            "base_url": base_url,
+            "username": username,
+            "password": password,
+            "display_name": display_name
+        })))
         .send()
     };
     let first = send()
@@ -514,7 +509,12 @@ mod tests {
         assert!(integration_needs_reconnect(&i));
         assert!(!integration_is_connected(&i));
         assert!(message_is_auth_failure(
-            i.connection.as_ref().unwrap().last_error.as_deref().unwrap()
+            i.connection
+                .as_ref()
+                .unwrap()
+                .last_error
+                .as_deref()
+                .unwrap()
         ));
         i.connection.as_mut().unwrap().status = "connected".into();
         i.connection.as_mut().unwrap().connected = true;

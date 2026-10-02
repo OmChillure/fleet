@@ -212,9 +212,7 @@ pub async fn rename_connection(
 ) -> DbResult<IntegrationConnection> {
     let name = display_name.trim();
     if name.is_empty() {
-        return Err(DbError::Conflict(
-            "connection name cannot be empty".into(),
-        ));
+        return Err(DbError::Conflict("connection name cannot be empty".into()));
     }
     let q = format!(
         r#"

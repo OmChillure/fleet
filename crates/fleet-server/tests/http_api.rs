@@ -5,20 +5,21 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use axum::body::Body;
-use axum::http::{header, HeaderMap, Request, StatusCode};
-use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
-use fleet_db::{connect_and_migrate_with, PoolConfig};
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
+use fleet_db::{PoolConfig, connect_and_migrate_with};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    build_http_app, AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app,
 };
+use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use sha2::Sha256;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -484,11 +485,7 @@ fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn this_machine_hostname() -> String {
@@ -891,9 +888,7 @@ async fn resume_non_blocked_task_is_conflict() {
     .await;
     assert_eq!(resume.status, StatusCode::CONFLICT, "{}", resume.body);
     assert!(
-        resume.body["error"]
-            .as_str()
-            .is_some_and(|e| !e.is_empty()),
+        resume.body["error"].as_str().is_some_and(|e| !e.is_empty()),
         "409 must publish ErrorBody.error: {}",
         resume.body
     );
@@ -1224,14 +1219,12 @@ async fn patch_fleet_config_sets_repo_url_and_git_ref() {
     .await;
     assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
     assert_eq!(
-        patched.body["config"]["repo_url"],
-        "https://github.com/acme/app.git",
+        patched.body["config"]["repo_url"], "https://github.com/acme/app.git",
         "{}",
         patched.body
     );
     assert_eq!(
-        patched.body["config"]["git_ref"],
-        "develop",
+        patched.body["config"]["git_ref"], "develop",
         "{}",
         patched.body
     );
@@ -1239,8 +1232,7 @@ async fn patch_fleet_config_sets_repo_url_and_git_ref() {
     let got = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(
-        got.body["config"]["repo_url"],
-        "https://github.com/acme/app.git",
+        got.body["config"]["repo_url"], "https://github.com/acme/app.git",
         "{}",
         got.body
     );
@@ -1280,8 +1272,7 @@ async fn patch_fleet_config_empty_repo_url_clears() {
         cleared.body
     );
     assert_eq!(
-        cleared.body["config"]["git_ref"],
-        "main",
+        cleared.body["config"]["git_ref"], "main",
         "clear must reset git_ref: {}",
         cleared.body
     );
@@ -1294,8 +1285,7 @@ async fn patch_fleet_config_empty_repo_url_clears() {
         got.body
     );
     assert_eq!(
-        got.body["config"]["git_ref"],
-        "main",
+        got.body["config"]["git_ref"], "main",
         "GET after clear must reset git_ref: {}",
         got.body
     );
@@ -1345,8 +1335,7 @@ async fn patch_fleet_config_git_ref_only_without_url_is_400() {
         got.body
     );
     assert_eq!(
-        got.body["config"]["git_ref"],
-        "main",
+        got.body["config"]["git_ref"], "main",
         "ref-only 400 must not change git_ref: {}",
         got.body
     );
@@ -1380,14 +1369,12 @@ async fn patch_fleet_config_omitted_url_updates_git_ref_when_remote_bound() {
     .await;
     assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
     assert_eq!(
-        patched.body["config"]["repo_url"],
-        "https://github.com/acme/app.git",
+        patched.body["config"]["repo_url"], "https://github.com/acme/app.git",
         "{}",
         patched.body
     );
     assert_eq!(
-        patched.body["config"]["git_ref"],
-        "feature",
+        patched.body["config"]["git_ref"], "feature",
         "{}",
         patched.body
     );
@@ -1395,8 +1382,7 @@ async fn patch_fleet_config_omitted_url_updates_git_ref_when_remote_bound() {
     let got = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(
-        got.body["config"]["repo_url"],
-        "https://github.com/acme/app.git",
+        got.body["config"]["repo_url"], "https://github.com/acme/app.git",
         "{}",
         got.body
     );
@@ -1442,14 +1428,12 @@ async fn patch_fleet_config_invalid_url_is_400_and_leaves_remote() {
     let got = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(
-        got.body["config"]["repo_url"],
-        "https://github.com/acme/app.git",
+        got.body["config"]["repo_url"], "https://github.com/acme/app.git",
         "invalid URL must leave the remote: {}",
         got.body
     );
     assert_eq!(
-        got.body["config"]["git_ref"],
-        "develop",
+        got.body["config"]["git_ref"], "develop",
         "invalid URL must leave git_ref: {}",
         got.body
     );
@@ -1488,12 +1472,7 @@ async fn workers_sandboxes_match_sessions_ids_and_fields() {
     let session_list = sessions.body["sessions"]
         .as_array()
         .unwrap_or_else(|| panic!("sessions array: {}", sessions.body));
-    assert_eq!(
-        session_list.len(),
-        1,
-        "planted row only: {}",
-        sessions.body
-    );
+    assert_eq!(session_list.len(), 1, "planted row only: {}", sessions.body);
     let session = &session_list[0];
     assert_eq!(session["id"], sid.to_string(), "{}", sessions.body);
     assert_eq!(session["status"], "spawning", "{}", sessions.body);
@@ -1631,14 +1610,7 @@ async fn get_workers_other_member_is_403() {
     let (_a, _a_jar, a_ws) = signup_and_login(&app).await;
     let (_b, b_jar, _) = signup_and_login(&app).await;
 
-    let workers = call(
-        &app,
-        "GET",
-        &fleet(&a_ws, "/workers"),
-        Some(&b_jar),
-        None,
-    )
-    .await;
+    let workers = call(&app, "GET", &fleet(&a_ws, "/workers"), Some(&b_jar), None).await;
     assert_eq!(workers.status, StatusCode::FORBIDDEN, "{}", workers.body);
 }
 
@@ -2121,8 +2093,7 @@ async fn invite_existing_member(app: &axum::Router, owner_jar: &CookieJar, ws: &
         invited.body
     );
     assert_eq!(
-        invited.body["added_existing_user"],
-        true,
+        invited.body["added_existing_user"], true,
         "invite of an existing user adds them immediately: {}",
         invited.body
     );
@@ -2183,10 +2154,7 @@ async fn chat_status_without_runner_id_is_openai_only() {
     .await;
     assert_eq!(status.status, StatusCode::OK, "{}", status.body);
     let providers = status.body["providers"].as_array().expect("providers");
-    let ids: Vec<&str> = providers
-        .iter()
-        .filter_map(|p| p["id"].as_str())
-        .collect();
+    let ids: Vec<&str> = providers.iter().filter_map(|p| p["id"].as_str()).collect();
     assert_eq!(
         ids,
         ["openai", "gemini"],
@@ -2249,13 +2217,8 @@ async fn chat_conversations_list_is_user_scoped() {
     let (app, state) = app_with_state().await;
     let (_owner_email, owner_jar, ws) = signup_and_login(&app).await;
     let member_jar = invite_existing_member(&app, &owner_jar, &ws).await;
-    let owner_cid = create_chat_conversation(
-        &app,
-        &owner_jar,
-        &ws,
-        &format!("owner-{}", Uuid::new_v4()),
-    )
-    .await;
+    let owner_cid =
+        create_chat_conversation(&app, &owner_jar, &ws, &format!("owner-{}", Uuid::new_v4())).await;
     let member_cid = create_chat_conversation(
         &app,
         &member_jar,
@@ -2344,11 +2307,7 @@ fn chat_tool_llm() -> fleet_server::chat_tools::ChatLlmContext {
     }
 }
 
-async fn authed_user_and_workspace(
-    app: &axum::Router,
-    jar: &CookieJar,
-    ws: &str,
-) -> (Uuid, Uuid) {
+async fn authed_user_and_workspace(app: &axum::Router, jar: &CookieJar, ws: &str) -> (Uuid, Uuid) {
     let me = call(app, "GET", "/api/auth/me", Some(jar), None).await;
     assert_eq!(me.status, StatusCode::OK, "me: {}", me.body);
     let user_id = Uuid::parse_str(
@@ -2399,7 +2358,11 @@ fn first_task_status(content: &Value) -> &Value {
     let tasks = content["tasks"]
         .as_array()
         .unwrap_or_else(|| panic!("tasks array: {content}"));
-    assert_eq!(tasks.len(), 1, "launch_agent_task is a 1-task plan: {content}");
+    assert_eq!(
+        tasks.len(),
+        1,
+        "launch_agent_task is a 1-task plan: {content}"
+    );
     &tasks[0]["status"]
 }
 
@@ -2483,12 +2446,7 @@ async fn complete_one_host_lease(app: &axum::Router, machine: &str, ws: &str) {
         Some(json!({ "lease_token": tok, "ok": true })),
     )
     .await;
-    assert_eq!(
-        done.status,
-        StatusCode::OK,
-        "lease complete: {}",
-        done.body
-    );
+    assert_eq!(done.status, StatusCode::OK, "lease complete: {}", done.body);
 }
 
 /// Empty assignable pool (min_isolation=vm, no VM host) leaves the chat run
@@ -2742,8 +2700,7 @@ async fn v1_projects_rejects_missing_bearer_and_session_cookie() {
         cookie_only.body
     );
     assert_eq!(
-        cookie_only.raw,
-        "invalid admin token",
+        cookie_only.raw, "invalid admin token",
         "cookie 401 must be invalid admin token, not admin-automation-disabled: {}",
         cookie_only.raw
     );
@@ -2774,8 +2731,7 @@ async fn v1_projects_rejects_wrong_admin_bearer() {
         wrong.body
     );
     assert_eq!(
-        wrong.raw,
-        "invalid admin token",
+        wrong.raw, "invalid admin token",
         "wrong Bearer must be invalid admin token, not admin-automation-disabled: {}",
         wrong.raw
     );
@@ -2890,8 +2846,7 @@ async fn v1_get_project_rejects_session_cookie() {
         cookie_get.body
     );
     assert_eq!(
-        cookie_get.raw,
-        "invalid admin token",
+        cookie_get.raw, "invalid admin token",
         "cookie GET must be invalid admin token: {}",
         cookie_get.raw
     );
@@ -3033,11 +2988,7 @@ async fn fleet_settings_patch_grok_is_400_and_leaves_ollama() {
         "rejected grok PATCH must not coerce stored fleet_llm: {}",
         after.body
     );
-    assert_eq!(
-        after.body["fleet_llm_model"], "llama3.2",
-        "{}",
-        after.body
-    );
+    assert_eq!(after.body["fleet_llm_model"], "llama3.2", "{}", after.body);
 }
 
 #[tokio::test]
@@ -3131,14 +3082,7 @@ async fn fleet_settings_get_require_membership() {
     let anon = call(&app, "GET", &fleet(&a_ws, "/settings"), None, None).await;
     assert_eq!(anon.status, StatusCode::UNAUTHORIZED, "{}", anon.body);
 
-    let other = call(
-        &app,
-        "GET",
-        &fleet(&a_ws, "/settings"),
-        Some(&b_jar),
-        None,
-    )
-    .await;
+    let other = call(&app, "GET", &fleet(&a_ws, "/settings"), Some(&b_jar), None).await;
     assert_eq!(other.status, StatusCode::FORBIDDEN, "{}", other.body);
 }
 
@@ -3182,8 +3126,7 @@ async fn fleet_personas_lists_builtin_or_roster() {
     let out = call(&app, "GET", &fleet(&ws, "/personas"), Some(&jar), None).await;
     assert_eq!(out.status, StatusCode::OK, "{}", out.body);
     assert_eq!(
-        out.body["source"],
-        "https://github.com/msitarzewski/agency-agents",
+        out.body["source"], "https://github.com/msitarzewski/agency-agents",
         "{}",
         out.body
     );
@@ -3196,10 +3139,7 @@ async fn fleet_personas_lists_builtin_or_roster() {
         "count must match personas array: {}",
         out.body
     );
-    let slugs: Vec<&str> = personas
-        .iter()
-        .filter_map(|p| p["slug"].as_str())
-        .collect();
+    let slugs: Vec<&str> = personas.iter().filter_map(|p| p["slug"].as_str()).collect();
     // Builtins and the cloned agency-agents roster both ship these three
     // slugs; `generalist` is fallback-only (no generalist.md upstream).
     for slug in [
@@ -3601,7 +3541,14 @@ async fn chat_tools_list_tickets_state_filter_returns_only_matching() {
     let open_key = format!("state-tool-{tag}/app#open");
     let launched_key = format!("state-tool-{tag}/app#launched");
     seed_inbox_ticket(&state, workspace_id, &open_key, "open ticket", false).await;
-    seed_inbox_ticket(&state, workspace_id, &launched_key, "launched ticket", false).await;
+    seed_inbox_ticket(
+        &state,
+        workspace_id,
+        &launched_key,
+        "launched ticket",
+        false,
+    )
+    .await;
     fleet_db::repos::tickets::mark_launched(
         &state.db,
         workspace_id,
@@ -3656,7 +3603,11 @@ async fn chat_tools_finish_ticket_loads_spec_without_launching() {
         "finish_ticket must not launch: {action:?}"
     );
     assert_eq!(loaded["launched"], false, "{loaded}");
-    assert_eq!(loaded["title"], format!("{key}: load spec only"), "{loaded}");
+    assert_eq!(
+        loaded["title"],
+        format!("{key}: load spec only"),
+        "{loaded}"
+    );
     assert_eq!(loaded["ticket"]["key"], key, "{loaded}");
     let spec = loaded["spec"]
         .as_str()
@@ -3899,8 +3850,7 @@ async fn cases_decide_use_tool_missing_tool_is_tool_error() {
     assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
     assert_eq!(decided.body["status"], "waiting", "{}", decided.body);
     assert_eq!(
-        decided.body["context"]["last_tool_result"]["ok"],
-        false,
+        decided.body["context"]["last_tool_result"]["ok"], false,
         "{}",
         decided.body
     );
@@ -4210,8 +4160,7 @@ async fn cancel_open_case(app: &axum::Router, jar: &CookieJar, ws: &str, title: 
         cancelled.body
     );
     assert_eq!(
-        cancelled.body["status"],
-        "cancelled",
+        cancelled.body["status"], "cancelled",
         "setup cancel: {}",
         cancelled.body
     );
@@ -4250,11 +4199,9 @@ fn parse_next_wake_at(body: &Value) -> chrono::DateTime<chrono::Utc> {
 
 fn assert_case_denied(out: &HttpOut, case_id: &str, title: &str, expected: StatusCode) {
     assert_eq!(
-        out.status,
-        expected,
+        out.status, expected,
         "must be {expected}, never leak a case: {} {}",
-        out.status,
-        out.body
+        out.status, out.body
     );
     if out.body.get("id").and_then(|v| v.as_str()) == Some(case_id) {
         panic!("leaked case id {case_id} in {}: {}", out.status, out.body);
@@ -4283,8 +4230,7 @@ async fn assert_case_untouched(
     assert_eq!(still.body["id"], case_id, "{}", still.body);
     assert_eq!(still.body["title"], title, "{}", still.body);
     assert_eq!(
-        still.body["status"],
-        "open",
+        still.body["status"], "open",
         "row must stay open: {}",
         still.body
     );
@@ -4300,8 +4246,7 @@ async fn assert_case_untouched(
 async fn cases_other_workspace_cannot_get() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (_a_jar, a_ws, b_jar, _b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (_a_jar, a_ws, b_jar, _b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4318,8 +4263,7 @@ async fn cases_other_workspace_cannot_get() {
 async fn cases_other_workspace_cannot_observe() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, _b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, _b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4337,8 +4281,7 @@ async fn cases_other_workspace_cannot_observe() {
 async fn cases_other_workspace_cannot_decide() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, _b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, _b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4358,8 +4301,7 @@ async fn cases_other_workspace_cannot_decide() {
 async fn cases_other_workspace_cannot_cancel() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, _b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, _b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4377,8 +4319,7 @@ async fn cases_other_workspace_cannot_cancel() {
 async fn cases_idor_get_foreign_case_is_not_found() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (_a_jar, _a_ws, b_jar, b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (_a_jar, _a_ws, b_jar, b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4395,8 +4336,7 @@ async fn cases_idor_get_foreign_case_is_not_found() {
 async fn cases_idor_observe_foreign_case_is_not_found() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4414,8 +4354,7 @@ async fn cases_idor_observe_foreign_case_is_not_found() {
 async fn cases_idor_decide_foreign_case_is_not_found() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4435,8 +4374,7 @@ async fn cases_idor_decide_foreign_case_is_not_found() {
 async fn cases_idor_cancel_foreign_case_is_not_found() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4454,8 +4392,7 @@ async fn cases_idor_cancel_foreign_case_is_not_found() {
 async fn cases_idor_wake_foreign_case_is_not_found() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let out = call(
         &app,
@@ -4473,8 +4410,7 @@ async fn cases_idor_wake_foreign_case_is_not_found() {
 async fn cases_other_workspace_cannot_list_or_create() {
     let app = app().await;
     let title = "tenant-a-secret-case";
-    let (a_jar, a_ws, b_jar, _b_ws, case_id) =
-        two_tenants_and_open_case(&app, title).await;
+    let (a_jar, a_ws, b_jar, _b_ws, case_id) = two_tenants_and_open_case(&app, title).await;
 
     let listed = call(&app, "GET", &cases_path(&a_ws, ""), Some(&b_jar), None).await;
     assert_eq!(
@@ -4487,14 +4423,8 @@ async fn cases_other_workspace_cannot_list_or_create() {
         .as_array()
         .into_iter()
         .flatten()
-        .any(|c| {
-            c["id"].as_str() == Some(case_id.as_str()) || c["title"].as_str() == Some(title)
-        });
-    assert!(
-        !leaked,
-        "B list must not leak A's case: {}",
-        listed.body
-    );
+        .any(|c| c["id"].as_str() == Some(case_id.as_str()) || c["title"].as_str() == Some(title));
+    assert!(!leaked, "B list must not leak A's case: {}", listed.body);
 
     let created = call(
         &app,
@@ -4514,8 +4444,7 @@ async fn cases_other_workspace_cannot_list_or_create() {
         "B POST A's cases: {}",
         created.body
     );
-    if created.body.get("title").and_then(|v| v.as_str()) == Some("tenant-b-should-not-create")
-    {
+    if created.body.get("title").and_then(|v| v.as_str()) == Some("tenant-b-should-not-create") {
         panic!(
             "B must not create into A's workspace: {} {}",
             created.status, created.body
@@ -4547,8 +4476,7 @@ async fn cases_other_workspace_cannot_list_or_create() {
 async fn cases_list_own_workspace_omits_foreign_case() {
     let app = app().await;
     let a_title = "tenant-a-secret-case";
-    let (_a_jar, _a_ws, b_jar, b_ws, a_case_id) =
-        two_tenants_and_open_case(&app, a_title).await;
+    let (_a_jar, _a_ws, b_jar, b_ws, a_case_id) = two_tenants_and_open_case(&app, a_title).await;
     let b_title = "tenant-b-own-case";
     let b_case_id = create_open_case(&app, &b_jar, &b_ws, b_title).await;
 
@@ -4816,8 +4744,7 @@ async fn cases_cancel_completed_is_noop() {
     .await;
     assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
     assert_eq!(
-        cancelled.body["status"],
-        "completed",
+        cancelled.body["status"], "completed",
         "cancel must not flip completed: {}",
         cancelled.body
     );
@@ -5006,8 +4933,7 @@ async fn cases_observe_trims_note_before_persist() {
         .find(|e| e["kind"].as_str() == Some("observed"))
         .unwrap_or_else(|| panic!("observed event missing: {}", got.body));
     assert_eq!(
-        observed["payload"]["note"],
-        "slack replied",
+        observed["payload"]["note"], "slack replied",
         "event note must be trimmed: {}",
         got.body
     );
@@ -5388,8 +5314,7 @@ async fn cases_decide_uppercase_or_padded_wait_is_not_unknown() {
             decided.body
         );
         assert_eq!(
-            decided.body["status"],
-            "waiting",
+            decided.body["status"], "waiting",
             "action={action:?}: {}",
             decided.body
         );
@@ -5425,8 +5350,7 @@ async fn cases_decide_empty_action_recovers_to_waiting() {
             decided.body
         );
         assert_eq!(
-            decided.body["status"],
-            "waiting",
+            decided.body["status"], "waiting",
             "action={action:?}: {}",
             decided.body
         );
@@ -5620,7 +5544,12 @@ async fn inbox_other_workspace_poll_is_403() {
         .as_array()
         .unwrap_or_else(|| panic!("tickets: {}", leftover.body));
     assert_eq!(tickets.len(), 1, "no new stub: {}", leftover.body);
-    assert_eq!(tickets[0]["key"].as_str(), Some(key.as_str()), "{}", leftover.body);
+    assert_eq!(
+        tickets[0]["key"].as_str(),
+        Some(key.as_str()),
+        "{}",
+        leftover.body
+    );
     assert_eq!(
         tickets[0]["state"].as_str(),
         Some("open"),
@@ -5660,7 +5589,12 @@ async fn inbox_other_workspace_finish_is_403() {
         .as_array()
         .unwrap_or_else(|| panic!("tickets: {}", leftover.body));
     assert_eq!(tickets.len(), 1, "no new stub: {}", leftover.body);
-    assert_eq!(tickets[0]["key"].as_str(), Some(key.as_str()), "{}", leftover.body);
+    assert_eq!(
+        tickets[0]["key"].as_str(),
+        Some(key.as_str()),
+        "{}",
+        leftover.body
+    );
     assert_eq!(
         tickets[0]["state"].as_str(),
         Some("open"),
@@ -5746,7 +5680,12 @@ async fn inbox_removed_member_poll_finish_is_403() {
         None,
     )
     .await;
-    assert_eq!(removed.status, StatusCode::OK, "remove member: {}", removed.body);
+    assert_eq!(
+        removed.status,
+        StatusCode::OK,
+        "remove member: {}",
+        removed.body
+    );
 
     let poll = call(
         &app,
@@ -5774,7 +5713,12 @@ async fn inbox_removed_member_poll_finish_is_403() {
         .as_array()
         .unwrap_or_else(|| panic!("tickets: {}", leftover.body));
     assert_eq!(tickets.len(), 1, "no new stub: {}", leftover.body);
-    assert_eq!(tickets[0]["key"].as_str(), Some(key.as_str()), "{}", leftover.body);
+    assert_eq!(
+        tickets[0]["key"].as_str(),
+        Some(key.as_str()),
+        "{}",
+        leftover.body
+    );
     assert_eq!(
         tickets[0]["state"].as_str(),
         Some("open"),
@@ -5851,9 +5795,14 @@ async fn inbox_finish_unseen_github_key_is_404_without_create_flag() {
     .await;
     assert_eq!(out.status, StatusCode::NOT_FOUND, "{}", out.body);
     let leftover = call(&app, "GET", &inbox_path(&ws, ""), Some(&jar), None).await;
-    let tickets = leftover.body["tickets"].as_array().cloned().unwrap_or_default();
+    let tickets = leftover.body["tickets"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        tickets.iter().all(|t| t["key"].as_str() != Some(key.as_str())),
+        tickets
+            .iter()
+            .all(|t| t["key"].as_str() != Some(key.as_str())),
         "must not stub-create: {}",
         leftover.body
     );
@@ -5896,7 +5845,12 @@ async fn inbox_finish_unseen_github_key_seeds_when_create_if_missing() {
         "{}",
         leftover.body
     );
-    assert_eq!(tickets[0]["key"].as_str(), Some(key.as_str()), "{}", leftover.body);
+    assert_eq!(
+        tickets[0]["key"].as_str(),
+        Some(key.as_str()),
+        "{}",
+        leftover.body
+    );
     assert_eq!(
         tickets[0]["state"].as_str(),
         Some("launched"),
@@ -6041,7 +5995,12 @@ async fn inbox_finish_empty_body_picks_the_only_open_ticket() {
         .as_array()
         .unwrap_or_else(|| panic!("tickets: {}", leftover.body));
     assert_eq!(tickets.len(), 1, "{}", leftover.body);
-    assert_eq!(tickets[0]["key"].as_str(), Some(key.as_str()), "{}", leftover.body);
+    assert_eq!(
+        tickets[0]["key"].as_str(),
+        Some(key.as_str()),
+        "{}",
+        leftover.body
+    );
     assert_eq!(
         tickets[0]["state"].as_str(),
         Some("launched"),
@@ -6346,7 +6305,10 @@ async fn inbox_poll_watching_skips_disconnected_github() {
         "disconnected github must not be watched: {}",
         polled.body
     );
-    let errors = polled.body["errors"].as_array().cloned().unwrap_or_default();
+    let errors = polled.body["errors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     for e in &errors {
         let low = e.as_str().unwrap_or("").to_ascii_lowercase();
         assert!(
@@ -6572,7 +6534,10 @@ async fn inbox_monitor_follow_connected_watches_whatever_is_connected() {
     let listed = call(&app, "GET", &inbox_path(&ws, ""), Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     assert_eq!(listed.body["monitor"]["follow_connected"], true);
-    assert_eq!(listed.body["monitor"]["watching"], json!(["github", "slack"]));
+    assert_eq!(
+        listed.body["monitor"]["watching"],
+        json!(["github", "slack"])
+    );
     assert_eq!(listed.body["monitor"]["providers"], json!([]));
 }
 
@@ -6749,7 +6714,10 @@ fn slack_webhook_headers(body: &[u8]) -> Vec<(String, String)> {
 }
 
 fn header_pairs(owned: &[(String, String)]) -> Vec<(&str, &str)> {
-    owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+    owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
 }
 
 #[tokio::test]
@@ -7018,7 +6986,12 @@ async fn post_workforce_goal_persists_acting_case_in_open_goals() {
     let listed_goal = open_goals
         .iter()
         .find(|g| g["id"].as_str() == Some(goal_id.as_str()))
-        .unwrap_or_else(|| panic!("posted goal {goal_id} missing from open_goals: {}", listed.body));
+        .unwrap_or_else(|| {
+            panic!(
+                "posted goal {goal_id} missing from open_goals: {}",
+                listed.body
+            )
+        });
     assert_eq!(
         listed_goal["title"].as_str(),
         Some("Ship the weather app"),
@@ -7202,7 +7175,12 @@ async fn workforce_http_is_workspace_scoped() {
         None,
     )
     .await;
-    assert_eq!(cancelled.status, StatusCode::FORBIDDEN, "{}", cancelled.body);
+    assert_eq!(
+        cancelled.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        cancelled.body
+    );
 }
 
 #[tokio::test]
@@ -7277,12 +7255,14 @@ async fn session_live_comes_from_worker_ingest_not_plane_file() {
         "t1 queued→ready"
     );
     let sid = Uuid::new_v4();
-    assert!(state
-        .orch
-        .store
-        .cas_assign_task(task.id, sid, 1)
-        .await
-        .expect("cas"));
+    assert!(
+        state
+            .orch
+            .store
+            .cas_assign_task(task.id, sid, 1)
+            .await
+            .expect("cas")
+    );
     let token = "live-worker-token";
     state
         .orch
@@ -7361,7 +7341,11 @@ async fn planner_goal_creates_accepted_plan_job() {
     .await;
     assert_eq!(created.status, StatusCode::OK, "{}", created.body);
     assert_eq!(created.body["status"], "accepted");
-    assert!(created.body["run_id"].as_str().is_some(), "{}", created.body);
+    assert!(
+        created.body["run_id"].as_str().is_some(),
+        "{}",
+        created.body
+    );
     let job_id = created.body["id"].as_str().expect("job id");
     let got = call(
         &app,
@@ -7417,7 +7401,11 @@ async fn fleet_cloud_attach_creates_sandboxed_host() {
     let host = &created.body["host"];
     assert_eq!(host["isolation"], "sandboxed", "{}", created.body);
     assert_eq!(host["runner_kind"], "fleet_cloud", "{}", created.body);
-    assert!(created.body["pair_token"].as_str().is_some(), "{}", created.body);
+    assert!(
+        created.body["pair_token"].as_str().is_some(),
+        "{}",
+        created.body
+    );
 }
 
 #[tokio::test]
@@ -7448,7 +7436,12 @@ async fn byo_cloud_requires_credentials_and_stays_sandboxed() {
     assert_eq!(created.body["host"]["isolation"], "sandboxed");
     assert_eq!(created.body["host"]["runner_kind"], "public_cloud");
     assert!(
-        created.body.to_string().to_ascii_lowercase().contains("akiafake") == false,
+        created
+            .body
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("akiafake")
+            == false,
         "credentials must not echo: {}",
         created.body
     );

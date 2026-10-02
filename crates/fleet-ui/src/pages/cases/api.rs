@@ -84,7 +84,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-
 async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Result<T, CaseError> {
     let status = res.status();
     let text = res

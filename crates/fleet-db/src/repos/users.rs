@@ -138,10 +138,8 @@ pub async fn count_instance_admins(pool: &PgPool) -> DbResult<i64> {
 }
 
 pub async fn count_by_status(pool: &PgPool) -> DbResult<Vec<(String, i64)>> {
-    sqlx::query_as::<_, (String, i64)>(
-        "SELECT status, COUNT(*)::bigint FROM users GROUP BY status",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(map_query_err)
+    sqlx::query_as::<_, (String, i64)>("SELECT status, COUNT(*)::bigint FROM users GROUP BY status")
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
 }

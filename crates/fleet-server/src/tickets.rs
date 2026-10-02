@@ -198,11 +198,19 @@ pub async fn monitor_tickets(
         args.trello_boards.as_deref(),
     );
     if let Some(repos) = args.gitea_repos.as_deref() {
-        let repos: Vec<&str> = repos.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let repos: Vec<&str> = repos
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         filters["gitea"] = json!({ "repos": repos });
     }
     if let Some(repos) = args.gogs_repos.as_deref() {
-        let repos: Vec<&str> = repos.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let repos: Vec<&str> = repos
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         filters["gogs"] = json!({ "repos": repos });
     }
     let github_repos = inbox_sources::github_repos(&filters);
@@ -2279,7 +2287,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AuthState};
+use fleet_auth::{AuthState, require_user};
 
 pub fn router() -> Router<AppState> {
     Router::new()

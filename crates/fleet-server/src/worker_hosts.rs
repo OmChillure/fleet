@@ -135,6 +135,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/worker-hosts/me/heartbeat", post(http_heartbeat))
         .route("/api/worker-hosts/me/lease", post(http_lease))
         .route(
+            "/api/worker-hosts/me/lease/{claim_id}/progress",
+            post(http_lease_progress),
+        )
+        .route(
             "/api/worker-hosts/me/lease/{claim_id}/complete",
             post(http_complete),
         )
@@ -1430,14 +1434,65 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     };
     match claim {
         None => Ok(Json(json!({ "claim": null }))),
-        Some(c) => Ok(Json(json!({
-            "claim": {
-                "id": c.id,
-                "lease_token": c.lease_token,
-                "payload": c.payload,
+        Some(c) => {
+            // Default lease is 2 minutes. A chat CLI runs longer than that;
+            // the host's next poll would reclaim the row and complete would 409.
+            if c.kind == "chat_turn" {
+                if let Some(token) = c.lease_token {
+                    let want = crate::runner_chat::chat_turn_lease_for(&c.payload);
+                    if want > LEASE_FOR {
+                        let _ = work_claims::heartbeat(&state.db, c.id, token, want).await?;
+                    }
+                }
             }
-        }))),
+            Ok(Json(json!({
+                "claim": {
+                    "id": c.id,
+                    "lease_token": c.lease_token,
+                    "payload": c.payload,
+                }
+            })))
+        }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ProgressBody {
+    lease_token: String,
+    text: String,
+}
+
+fn clip_progress(raw: &str) -> String {
+    let t = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() > 200 {
+        let mut s: String = chars.into_iter().take(199).collect();
+        s.push('…');
+        s
+    } else {
+        t
+    }
+}
+
+async fn http_lease_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(claim_id): Path<Uuid>,
+    Json(body): Json<ProgressBody>,
+) -> AppResult<Json<Value>> {
+    let host = require_machine(&state, &headers).await?;
+    let lease_token = Uuid::parse_str(body.lease_token.trim())
+        .map_err(|_| AppError::bad_request("lease_token must be a UUID"))?;
+    let text = clip_progress(&body.text);
+    if text.is_empty() {
+        return Err(AppError::bad_request("progress text is empty"));
+    }
+    let held =
+        work_claims::note_lease_progress(&state.db, claim_id, lease_token, host.id, &text).await?;
+    if !held {
+        return Err(AppError::conflict("lease not held or already finished"));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn http_complete(

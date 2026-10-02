@@ -254,15 +254,7 @@ async fn reclaim_stale_deciding_leaves_open_waiting_acting() {
 
     let mut rows = Vec::new();
     for status in ["open", "waiting", "acting"] {
-        let row = insert_then_patch_due(
-            &pool,
-            workspace_id,
-            user_id,
-            status,
-            status,
-            future,
-        )
-        .await;
+        let row = insert_then_patch_due(&pool, workspace_id, user_id, status, status, future).await;
         backdate_updated_at(&pool, row.id, STALE_DECIDING_SECS + 30).await;
         rows.push((status, row));
     }

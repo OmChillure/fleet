@@ -299,6 +299,36 @@ pub async fn complete_owned_with_result(
     Ok(res.rows_affected() == 1)
 }
 
+/// Record what the leased CLI is doing (`Using bash…`) without finishing the row.
+/// Only the current lease holder can write it.
+pub async fn note_lease_progress(
+    pool: &PgPool,
+    claim_id: Uuid,
+    lease_token: Uuid,
+    host_id: Uuid,
+    text: &str,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET payload = jsonb_set(payload, '{progress}', to_jsonb($4::text), true),
+            updated_at = now()
+        WHERE id = $1
+          AND lease_token = $2
+          AND lease_owner = $3
+          AND status = 'leased'
+        "#,
+    )
+    .bind(claim_id)
+    .bind(lease_token)
+    .bind(host_id)
+    .bind(text)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
 pub async fn fail(
     pool: &PgPool,
     claim_id: Uuid,

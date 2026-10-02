@@ -3,8 +3,6 @@
 
 use dioxus::prelude::*;
 
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
     #[default]

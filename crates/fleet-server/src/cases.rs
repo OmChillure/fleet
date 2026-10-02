@@ -1507,12 +1507,9 @@ async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Resu
         .await
         .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string());
     plan.policy.run_mode = run_mode.clone();
-    let llm = crate::chat_tools::composer_or_fallback_for(
-        state,
-        case.workspace_id,
-        case.created_by,
-    )
-    .await;
+    let llm =
+        crate::chat_tools::composer_or_fallback_for(state, case.workspace_id, case.created_by)
+            .await;
     if run_mode != fleet_db::WORKER_HOST_RUN_IN_CONTAINER {
         crate::chat_tools::require_taking_runner(&llm).map_err(|e| e.to_string())?;
     }

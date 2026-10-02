@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use super::shape::{list_sandboxes_path, SandboxesResponse};
+use super::shape::{SandboxesResponse, list_sandboxes_path};
 use crate::pages::auth::api::{auth_base_url, with_credentials};
 
 pub use super::shape::SandboxRow;

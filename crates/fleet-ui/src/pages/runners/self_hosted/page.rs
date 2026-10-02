@@ -19,10 +19,10 @@ use super::api::{
     PackageInventory, create_host, fetch_local_model_tags, fetch_local_models, install_commands,
     list_workers_page, patch_host, revoke_host, windows_install_command,
 };
-use crate::pages::auth::api::auth_base_url;
 use crate::clipboard::copy_text;
 use crate::components::side_panel::SidePanel;
 use crate::components::toast::show_toast;
+use crate::pages::auth::api::auth_base_url;
 use fleet_runners_view::InstallModelRequest;
 
 const POLL_MS: u32 = 10_000;

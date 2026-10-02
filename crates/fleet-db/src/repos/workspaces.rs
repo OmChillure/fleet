@@ -410,31 +410,27 @@ pub async fn set_default_egress_allowlist(
 }
 
 pub async fn run_envelope(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
-    let row = sqlx::query_scalar::<_, String>(
-        "SELECT run_envelope FROM workspaces WHERE id = $1",
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_query_err)?;
+    let row = sqlx::query_scalar::<_, String>("SELECT run_envelope FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?;
     row.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
 pub async fn egress_envelope(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
-    let row = sqlx::query_scalar::<_, String>(
-        "SELECT egress_envelope FROM workspaces WHERE id = $1",
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_query_err)?;
+    let row =
+        sqlx::query_scalar::<_, String>("SELECT egress_envelope FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(map_query_err)?;
     row.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
 pub async fn set_run_envelope(pool: &PgPool, workspace_id: Uuid, mode: &str) -> DbResult<String> {
-    let mode = parse_worker_host_run_mode(mode).ok_or_else(|| {
-        DbError::Conflict("run_envelope must be on_pc or in_container".into())
-    })?;
+    let mode = parse_worker_host_run_mode(mode)
+        .ok_or_else(|| DbError::Conflict("run_envelope must be on_pc or in_container".into()))?;
     let stored = sqlx::query_scalar::<_, String>(
         r#"
         UPDATE workspaces
@@ -463,7 +459,7 @@ pub async fn set_egress_envelope(
         _ => {
             return Err(DbError::Conflict(
                 "egress_envelope must be open, allowlist, or none".into(),
-            ))
+            ));
         }
     };
     let stored = sqlx::query_scalar::<_, String>(
@@ -754,10 +750,7 @@ pub async fn list_open_invites(
         .map_err(map_query_err)
 }
 
-pub async fn find_invite_by_token(
-    pool: &PgPool,
-    token: &str,
-) -> DbResult<Option<WorkspaceInvite>> {
+pub async fn find_invite_by_token(pool: &PgPool, token: &str) -> DbResult<Option<WorkspaceInvite>> {
     let q = format!(
         r#"
         SELECT {INVITE_COLS} FROM workspace_invites

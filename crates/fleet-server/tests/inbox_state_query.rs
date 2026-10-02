@@ -17,7 +17,8 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -448,10 +449,7 @@ async fn seed_inbox(state: &AppState, workspace_id: Uuid, key: &str, title: &str
     .unwrap_or_else(|e| panic!("seed {key}: {e}"));
 }
 
-async fn seed_open_launched_done(
-    state: &AppState,
-    workspace_id: Uuid,
-) -> (String, String, String) {
+async fn seed_open_launched_done(state: &AppState, workspace_id: Uuid) -> (String, String, String) {
     let tag = Uuid::new_v4();
     let open_key = format!("state-q-{tag}/app#open");
     let launched_key = format!("state-q-{tag}/app#launched");

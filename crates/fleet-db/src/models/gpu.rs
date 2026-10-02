@@ -417,10 +417,7 @@ mod tests {
 
     #[test]
     fn arm_mali_and_immortalis_from_cpu() {
-        assert_eq!(
-            infer_igpu_from_cpu("Mali-G78").as_deref(),
-            Some("ARM Mali")
-        );
+        assert_eq!(infer_igpu_from_cpu("Mali-G78").as_deref(), Some("ARM Mali"));
         assert_eq!(
             infer_igpu_from_cpu("Immortalis-G720").as_deref(),
             Some("ARM Immortalis")

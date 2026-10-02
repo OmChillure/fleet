@@ -416,9 +416,7 @@ pub async fn count_orch_runs(pool: &PgPool) -> DbResult<Vec<StatusCount>> {
     .await
 }
 
-pub async fn workspace_names(
-    pool: &PgPool,
-) -> DbResult<Vec<(Uuid, String, String)>> {
+pub async fn workspace_names(pool: &PgPool) -> DbResult<Vec<(Uuid, String, String)>> {
     sqlx::query_as::<_, (Uuid, String, String)>("SELECT id, slug, name FROM workspaces")
         .fetch_all(pool)
         .await

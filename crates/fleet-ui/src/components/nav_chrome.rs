@@ -63,9 +63,9 @@ pub fn section_for_route(route: &Route) -> Option<NavSection> {
         | Route::PartnersPage { .. }
         | Route::RunnersIndex { .. }
         | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
-        Route::Integrations { .. }
-        | Route::ConnectionEdit { .. }
-        | Route::Settings { .. } => Some(NavSection::Workspace),
+        Route::Integrations { .. } | Route::ConnectionEdit { .. } | Route::Settings { .. } => {
+            Some(NavSection::Workspace)
+        }
         Route::Admin {} => Some(NavSection::Instance),
         _ => None,
     }

@@ -5,16 +5,16 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    format_context_markdown, operations_for, supported_providers, ProxyCaller, ProxyResult,
+    ProxyCaller, ProxyResult, format_context_markdown, operations_for, supported_providers,
 };
-use fleet_integrations::{catalog, IntegrationAvailability};
+use fleet_integrations::{IntegrationAvailability, catalog};
 use fleet_orchestrator::domain::{
-    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, MAX_PROJECT_AGENTS,
-    MAX_TASKS_PER_PLAN,
+    MAX_PROJECT_AGENTS, MAX_TASKS_PER_PLAN, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody,
+    WorkPlanStatus,
 };
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -1305,11 +1305,7 @@ pub fn coerce_integration_args(
             }
         }
     }
-    if changed {
-        Some(next)
-    } else {
-        None
-    }
+    if changed { Some(next) } else { None }
 }
 
 fn write_text_missing(args: &Value) -> bool {
@@ -3158,20 +3154,24 @@ mod tests {
             .is_ok(),
             "OpenAI is a runner CLI; missing runner is require_taking_runner"
         );
-        assert!(require_taking_runner(&ChatLlmContext {
-            provider: "openai".into(),
-            model: "any".into(),
-            runner_id: None,
-            effort: None,
-        })
-        .is_err());
-        assert!(require_taking_runner(&ChatLlmContext {
-            provider: "gemini".into(),
-            model: "any".into(),
-            runner_id: None,
-            effort: None,
-        })
-        .is_err());
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "openai".into(),
+                model: "any".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_err()
+        );
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "gemini".into(),
+                model: "any".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_err()
+        );
         assert!(
             require_runner_worker_llm(&ChatLlmContext {
                 provider: "ollama".into(),
@@ -3182,20 +3182,24 @@ mod tests {
             .is_ok(),
             "chat may queue ollama work until a runner appears"
         );
-        assert!(require_taking_runner(&ChatLlmContext {
-            provider: "ollama".into(),
-            model: "tiny".into(),
-            runner_id: None,
-            effort: None,
-        })
-        .is_err());
-        assert!(require_taking_runner(&ChatLlmContext {
-            provider: "ollama".into(),
-            model: "tiny".into(),
-            runner_id: Some(Uuid::now_v7()),
-            effort: None,
-        })
-        .is_ok());
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "ollama".into(),
+                model: "tiny".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_err()
+        );
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "ollama".into(),
+                model: "tiny".into(),
+                runner_id: Some(Uuid::now_v7()),
+                effort: None,
+            })
+            .is_ok()
+        );
     }
 
     #[test]
@@ -3205,10 +3209,12 @@ mod tests {
 
     #[test]
     fn parse_launch_plan_args_rejects_blank_id() {
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": " ", "title": "X" }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": " ", "title": "X" }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3237,19 +3243,23 @@ mod tests {
 
     #[test]
     fn parse_launch_plan_args_rejects_blank_task_title() {
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": "a", "title": "  " }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": "a", "title": "  " }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn parse_launch_plan_args_rejects_task_title_over_200() {
         let title = "x".repeat(201);
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": "a", "title": title }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": "a", "title": title }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]

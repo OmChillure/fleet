@@ -1,6 +1,6 @@
 //! Inbox adapters: which connected apps feed the watcher.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// What kind of work an inbox item is. Drives the auto-launch plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -77,7 +77,9 @@ pub fn resolve_posture(
 }
 
 fn concrete_run(raw: Option<&str>) -> Option<&'static str> {
-    raw.map(str::trim).filter(|s| !s.is_empty()).and_then(run_name)
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(run_name)
 }
 
 fn concrete_egress(raw: Option<&str>) -> Option<&'static str> {

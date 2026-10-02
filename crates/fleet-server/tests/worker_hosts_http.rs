@@ -7,17 +7,18 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, Request, StatusCode};
-use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
-use fleet_db::{connect_and_migrate_with, PoolConfig};
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
+use fleet_db::{PoolConfig, connect_and_migrate_with};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    build_http_app, AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app,
 };
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -805,9 +806,9 @@ async fn cluster_host_not_injected_into_other_workspace_list() {
         .as_array()
         .unwrap_or_else(|| panic!("bootstrap cp_settings.labels: {}", boot.body));
     assert!(
-        boot_labels
-            .iter()
-            .any(|l| l.as_str().is_some_and(|s| s.eq_ignore_ascii_case("cluster"))),
+        boot_labels.iter().any(|l| l
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("cluster"))),
         "bootstrap must stamp labels∋cluster: {}",
         boot.body
     );
@@ -826,9 +827,7 @@ async fn cluster_host_not_injected_into_other_workspace_list() {
         .as_array()
         .unwrap_or_else(|| panic!("B list hosts array: {}", out.body));
     assert!(
-        hosts
-            .iter()
-            .all(|h| h["id"].as_str() != Some(hid.as_str())),
+        hosts.iter().all(|h| h["id"].as_str() != Some(hid.as_str())),
         "B GET list must not include A's cluster hid {hid}: {}",
         out.body
     );
@@ -1179,11 +1178,7 @@ async fn this_machine_origin_is_true_only_for_real_loopback() {
             "loopback Origin {origin} GET /worker-hosts: {}",
             list.body
         );
-        assert_plane_this_machine(
-            list_host_by_id(&list, &hid, origin),
-            true,
-            origin,
-        );
+        assert_plane_this_machine(list_host_by_id(&list, &hid, origin), true, origin);
     }
 
     let lan = call_with_headers(
@@ -1294,11 +1289,7 @@ fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 async fn pair_plane_box_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String {
@@ -2227,10 +2218,7 @@ async fn pair_unset_worker_public_base_still_ignores_host_header() {
         "unset WORKER_PUBLIC_BASE pair control_plane_url must be API_PUBLIC_BASE, not Host: {}",
         paired.body
     );
-    assert_omits_evil_pair_origin(
-        &paired.raw,
-        "POST /pair with WORKER unset and spoofed Host",
-    );
+    assert_omits_evil_pair_origin(&paired.raw, "POST /pair with WORKER unset and spoofed Host");
 }
 
 /// POST /bootstrap with a seeded workspace uses WORKER_PUBLIC_BASE for
@@ -2631,7 +2619,12 @@ async fn machine_token_plaintext_omitted_from_get_and_heartbeat_after_rotate() {
         None,
     )
     .await;
-    assert_eq!(got.status, StatusCode::OK, "get after refused rotate: {}", got.body);
+    assert_eq!(
+        got.status,
+        StatusCode::OK,
+        "get after refused rotate: {}",
+        got.body
+    );
     assert_later_http_omits_machine_plaintext(
         &got,
         &[&old_flm],
@@ -2701,14 +2694,7 @@ async fn unauthorized_machine_route_must_not_echo_presented_flm_() {
         hb.raw
     );
 
-    let lease = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/lease",
-        &presented,
-        None,
-    )
-    .await;
+    let lease = call_bearer(&app, "POST", "/api/worker-hosts/me/lease", &presented, None).await;
     assert_eq!(
         lease.status,
         StatusCode::UNAUTHORIZED,
@@ -3544,7 +3530,12 @@ async fn post_kind_control_plane_is_400_and_inserts_nothing() {
     let (_email, jar, ws) = signup_and_login(&app).await;
 
     let before = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    assert_eq!(before.status, StatusCode::OK, "list before: {}", before.body);
+    assert_eq!(
+        before.status,
+        StatusCode::OK,
+        "list before: {}",
+        before.body
+    );
     let before_ids: Vec<String> = before.body["hosts"]
         .as_array()
         .expect("hosts")
@@ -3568,7 +3559,12 @@ async fn post_kind_control_plane_is_400_and_inserts_nothing() {
     );
 
     let list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    assert_eq!(list.status, StatusCode::OK, "list after POST: {}", list.body);
+    assert_eq!(
+        list.status,
+        StatusCode::OK,
+        "list after POST: {}",
+        list.body
+    );
     let hosts = list.body["hosts"].as_array().expect("hosts");
     let after_ids: Vec<String> = hosts
         .iter()
@@ -3850,8 +3846,7 @@ async fn post_isolation_sandboxed_is_400_and_does_not_insert() {
     );
     let after = workspace_host_ids(&state, ws_id).await;
     assert_eq!(
-        after,
-        before,
+        after, before,
         "POST isolation=sandboxed must not insert a worker_hosts row: before={before:?} after={after:?}"
     );
 }
@@ -3926,8 +3921,7 @@ async fn post_kind_cloud_and_aws_http_does_not_create_assignable_host() {
         );
         let after = workspace_host_ids(&state, ws_id).await;
         assert_eq!(
-            after,
-            before,
+            after, before,
             "POST kind={kind} must not insert a worker_hosts row: before={before:?} after={after:?}"
         );
     }
@@ -5096,14 +5090,12 @@ async fn empty_workspace_list_still_publishes_package_versions() {
         listed.body
     );
     assert_ne!(
-        listed.body["package_versions"]["fleet-host"],
-        "0.0.0",
+        listed.body["package_versions"]["fleet-host"], "0.0.0",
         "fleet-host [verify] must not fall back to 0.0.0: {}",
         listed.body
     );
     assert_ne!(
-        listed.body["package_versions"]["fleet-driver"],
-        "0.0.0",
+        listed.body["package_versions"]["fleet-driver"], "0.0.0",
         "fleet-driver [verify] must not fall back to 0.0.0: {}",
         listed.body
     );
@@ -5267,13 +5259,7 @@ async fn admin_token_machine_cannot_authenticate_heartbeat_or_lease() {
         &admin_done,
         "Bearer test-admin /me/lease/{claim_id}/complete (real lease_token)",
     );
-    assert_claim_still_leased(
-        &state,
-        claim_id,
-        &lease_token,
-        "after ADMIN_TOKEN complete",
-    )
-    .await;
+    assert_claim_still_leased(&state, claim_id, &lease_token, "after ADMIN_TOKEN complete").await;
 
     let created = call_bearer(
         &app,
@@ -5749,7 +5735,12 @@ async fn pair_token_cannot_complete_held_lease() {
         Some(json!({ "name": format!("unused-flp-{}", Uuid::new_v4()) })),
     )
     .await;
-    assert_eq!(unused.status, StatusCode::OK, "create unused: {}", unused.body);
+    assert_eq!(
+        unused.status,
+        StatusCode::OK,
+        "create unused: {}",
+        unused.body
+    );
     let unused_flp = unused.body["pair_token"]
         .as_str()
         .expect("unused pair_token")
@@ -8293,8 +8284,7 @@ async fn list_software_status_unknown_with_staged_desired() {
     let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
-    let (_id, _machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let (_id, _machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     let unknown = listed.body["hosts"]
         .as_array()
@@ -8318,8 +8308,7 @@ async fn heartbeat_software_status_current_when_bins_match() {
     let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
-    let (id, machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let (id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
     let hb = call_bearer(
         &app,
         "POST",
@@ -8354,7 +8343,11 @@ async fn heartbeat_software_status_current_when_bins_match() {
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(got.body["software_status"], "current", "{}", got.body);
     assert_eq!(got.body["outdated"], false, "{}", got.body);
-    assert_eq!(got.body["desired"]["platform"], "linux-x86_64", "{}", got.body);
+    assert_eq!(
+        got.body["desired"]["platform"], "linux-x86_64",
+        "{}",
+        got.body
+    );
 }
 
 #[tokio::test]
@@ -8362,8 +8355,7 @@ async fn heartbeat_desired_null_when_unstaged() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (_id, machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let (_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
 
     let hb = call_bearer(
         &app,
@@ -8383,11 +8375,7 @@ async fn heartbeat_desired_null_when_unstaged() {
         "unstaged desired must be null: {}",
         hb.body
     );
-    assert_eq!(
-        hb.body["host"]["software_status"], "unknown",
-        "{}",
-        hb.body
-    );
+    assert_eq!(hb.body["host"]["software_status"], "unknown", "{}", hb.body);
 }
 
 #[tokio::test]
@@ -8396,8 +8384,7 @@ async fn get_host_behind_after_mismatch_bins() {
     write_platform_manifest(dir.path(), "linux-x86_64", "aaa111", "stage-tree");
     let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (id, machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let (id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
 
     let hb = call_bearer(
         &app,
@@ -8438,8 +8425,7 @@ async fn list_software_status_current_after_matching_bins() {
     write_platform_manifest(dir.path(), "linux-x86_64", "aaa111", "stage-tree");
     let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (_id, machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let (_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
 
     let hb = call_bearer(
         &app,
@@ -10532,7 +10518,9 @@ async fn install_model_safe_spec_does_not_bump_settings_gen() {
         leftover.body
     );
     assert_eq!(
-        leftover.body["settings_gen"].as_i64().expect("settings_gen"),
+        leftover.body["settings_gen"]
+            .as_i64()
+            .expect("settings_gen"),
         gen0,
         "GET settings_gen must stay seed: {}",
         leftover.body
@@ -10583,14 +10571,7 @@ async fn install_model_400_does_not_apply_sibling_fields() {
         "after 400 sibling fields",
     )
     .await;
-    assert_install_request_is(
-        &app,
-        &jar,
-        &host_path,
-        None,
-        "after 400 sibling fields",
-    )
-    .await;
+    assert_install_request_is(&app, &jar, &host_path, None, "after 400 sibling fields").await;
 }
 
 /// Owner PATCH runtime_settings with ;|& is 400 and does not persist.
@@ -10793,7 +10774,12 @@ async fn patch_runtime_settings_non_object_is_400() {
             rejected.body
         );
         let got = call(&app, "GET", &host_path, Some(&jar), None).await;
-        assert_eq!(got.status, StatusCode::OK, "GET after {label}: {}", got.body);
+        assert_eq!(
+            got.status,
+            StatusCode::OK,
+            "GET after {label}: {}",
+            got.body
+        );
         assert_eq!(
             got.body.get("runtime_settings").unwrap_or(&Value::Null),
             &seed_settings,
@@ -10841,7 +10827,12 @@ async fn patch_runtime_settings_rejects_control_and_overlong_work_dir() {
             rejected.body
         );
         let got = call(&app, "GET", &host_path, Some(&jar), None).await;
-        assert_eq!(got.status, StatusCode::OK, "GET after {label}: {}", got.body);
+        assert_eq!(
+            got.status,
+            StatusCode::OK,
+            "GET after {label}: {}",
+            got.body
+        );
         assert_eq!(
             got.body.get("runtime_settings").unwrap_or(&Value::Null),
             &seed_settings,
@@ -10992,8 +10983,8 @@ struct LocalModelTagsNoOutbound {
 
 impl LocalModelTagsNoOutbound {
     fn arm() -> Self {
-        use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
         let before_1234 = tcp_rows_to_remote_port(1234);
         let before_443 = tcp_rows_to_remote_port(443);
@@ -11540,14 +11531,25 @@ async fn llm_keys_revoke_hides_key_from_list() {
     let listed = call(&app, "GET", &path, Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     let keys = listed.body["keys"].as_array().expect("keys");
-    assert!(keys.is_empty(), "revoked key must leave the active list: {}", listed.body);
+    assert!(
+        keys.is_empty(),
+        "revoked key must leave the active list: {}",
+        listed.body
+    );
 }
 
 #[tokio::test]
 async fn fixture_run_mode_in_container_is_stamped() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let _ = call(&app, "GET", &format!("/api/workspaces/{ws}/fleet"), Some(&jar), None).await;
+    let _ = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/fleet"),
+        Some(&jar),
+        None,
+    )
+    .await;
     let fx = call(
         &app,
         "POST",

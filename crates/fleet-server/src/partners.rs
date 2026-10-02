@@ -8,9 +8,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
-use fleet_db::repos::workspaces as workspace_repo;
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::PartnersDisclaimerAck;
+use fleet_db::repos::workspaces as workspace_repo;
 use uuid::Uuid;
 
 use crate::state::AppState;

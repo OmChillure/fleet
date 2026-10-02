@@ -2,11 +2,11 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use axum::Router;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::WorkerSoftwareManifest;
 
@@ -286,11 +286,7 @@ fn uname_arg(flag: &str) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn is_musl() -> bool {
@@ -538,7 +534,12 @@ fn script_response(name: &str, body: &str) -> Response {
     } else {
         HeaderValue::from_static("text/plain; charset=utf-8")
     };
-    (StatusCode::OK, [(header::CONTENT_TYPE, ct)], body.to_string()).into_response()
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, ct)],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 /// Every script `GET /install/worker/{name}` can serve. Tests iterate this so a
@@ -670,10 +671,7 @@ mod tests {
             map_uname_platform("MINGW64", "x86_64", false),
             "windows-x86_64"
         );
-        assert_eq!(
-            map_uname_platform("msys", "amd64", false),
-            "windows-x86_64"
-        );
+        assert_eq!(map_uname_platform("msys", "amd64", false), "windows-x86_64");
         assert_eq!(
             map_uname_platform("windows", "aarch64", false),
             "windows-arm64"
@@ -686,10 +684,7 @@ mod tests {
             map_uname_platform("macos", "x86_64", false),
             "darwin-x86_64"
         );
-        assert_eq!(
-            map_uname_platform("Darwin", "x64", false),
-            "darwin-x86_64"
-        );
+        assert_eq!(map_uname_platform("Darwin", "x64", false), "darwin-x86_64");
     }
 
     #[test]
@@ -1277,8 +1272,7 @@ exit 0
         let token = "flp_testdeadbeef";
         assert_ne!(raw_url, normalized);
 
-        let probe =
-            run_install_worker_bootstrap(raw_url, token, CHILD_ENV_DUMP_SH, None);
+        let probe = run_install_worker_bootstrap(raw_url, token, CHILD_ENV_DUMP_SH, None);
         assert!(
             probe.success,
             "bootstrap must run the platform child: {}",
@@ -1317,11 +1311,9 @@ exit 0
         let set_url = boot
             .find("$env:FLEET_URL = $origin")
             .expect("install-worker.ps1 must set $env:FLEET_URL to the normalized origin");
-        let set_origin = boot
-            .find("$env:FLEET_INSTALL_ORIGIN = $origin")
-            .expect(
-                "install-worker.ps1 must set $env:FLEET_INSTALL_ORIGIN to the normalized origin",
-            );
+        let set_origin = boot.find("$env:FLEET_INSTALL_ORIGIN = $origin").expect(
+            "install-worker.ps1 must set $env:FLEET_INSTALL_ORIGIN to the normalized origin",
+        );
         let invoke = boot
             .find("[scriptblock]::Create")
             .expect("bootstrap must invoke the downloaded platform .ps1");
@@ -1610,11 +1602,8 @@ exit 0
     /// FLEET_PAIR_TOKEN must still pass the token gate.
     #[test]
     fn install_worker_already_paired_machine_token_allows_missing_pair_token() {
-        let run = run_unix_common_install_at(
-            None,
-            "http://pair.example.test:1",
-            Some("flm_existing"),
-        );
+        let run =
+            run_unix_common_install_at(None, "http://pair.example.test:1", Some("flm_existing"));
         assert!(
             !run.success,
             "closed origin must not install bins: {}",
@@ -1743,9 +1732,8 @@ exit 0
             .find("return")
             .map(|i| detect_at + i)
             .expect("FLEET_DETECT_ONLY=1 must return before downloading the platform script");
-        let url_at = windows_bootstrap_platform_script_url_offset(boot).expect(
-            "install-worker.ps1 must download $origin/install/worker/${platform}.ps1",
-        );
+        let url_at = windows_bootstrap_platform_script_url_offset(boot)
+            .expect("install-worker.ps1 must download $origin/install/worker/${platform}.ps1");
         assert!(
             return_at < url_at,
             "FLEET_DETECT_ONLY=1 return must precede the platform-script download"
@@ -1758,9 +1746,10 @@ exit 0
     fn install_worker_windows_pair_token_required_before_writing_bins() {
         for name in ["windows-x86_64.ps1", "windows-arm64.ps1"] {
             let body = script_body(name).expect("wired");
-            let token_at = windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
-                panic!("{name} must fail closed when FLEET_PAIR_TOKEN is missing")
-            });
+            let token_at =
+                windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
+                    panic!("{name} must fail closed when FLEET_PAIR_TOKEN is missing")
+                });
             let mkdir_at = body
                 .find("New-Item")
                 .expect("platform script creates BIN_DIR");
@@ -1775,9 +1764,9 @@ exit 0
                 token_at < download_at,
                 "{name} empty FLEET_PAIR_TOKEN must throw before downloading bins"
             );
-            let pair_at = body.find("FLEET_PAIR_TOKEN").unwrap_or_else(|| {
-                panic!("{name} must read FLEET_PAIR_TOKEN")
-            });
+            let pair_at = body
+                .find("FLEET_PAIR_TOKEN")
+                .unwrap_or_else(|| panic!("{name} must read FLEET_PAIR_TOKEN"));
             assert!(
                 body[pair_at..token_at].contains(".Trim()"),
                 "{name} must Trim FLEET_PAIR_TOKEN so whitespace-only is empty"
@@ -1791,9 +1780,8 @@ exit 0
     fn install_worker_windows_already_paired_allows_missing_pair_token() {
         for name in ["windows-x86_64.ps1", "windows-arm64.ps1"] {
             let body = script_body(name).expect("wired");
-            let throw_at = windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
-                panic!("{name} must throw on first-install missing pair token")
-            });
+            let throw_at = windows_first_install_pair_token_throw_offset(body)
+                .unwrap_or_else(|| panic!("{name} must throw on first-install missing pair token"));
             let before = &body[..throw_at];
             assert!(
                 before.contains("FLEET_HOST_CONFIG_DIR") && before.contains("machine.token"),
@@ -1815,9 +1803,8 @@ exit 0
     fn install_worker_windows_whitespace_machine_token_still_requires_pair_token() {
         for name in ["windows-x86_64.ps1", "windows-arm64.ps1"] {
             let body = script_body(name).expect("wired");
-            let throw_at = windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
-                panic!("{name} must throw on first-install missing pair token")
-            });
+            let throw_at = windows_first_install_pair_token_throw_offset(body)
+                .unwrap_or_else(|| panic!("{name} must throw on first-install missing pair token"));
             let mkdir_at = body
                 .find("New-Item")
                 .expect("platform script creates BIN_DIR");
@@ -1954,7 +1941,8 @@ exit 22
     }
 
     fn fetched_past_health(urls: &str) -> bool {
-        urls.lines().any(|u| !u.is_empty() && !u.contains("/health"))
+        urls.lines()
+            .any(|u| !u.is_empty() && !u.contains("/health"))
     }
 
     const UNIX_LOOPBACK_SCRIPTS: &[&str] = &["install-worker.sh", "_unix_common.sh"];
@@ -1986,8 +1974,7 @@ exit 22
                     off.combined
                 );
                 assert!(
-                    off.requested_urls.is_empty()
-                        || fetched_only_health_probe(&off.requested_urls),
+                    off.requested_urls.is_empty() || fetched_only_health_probe(&off.requested_urls),
                     "{script} off-box loopback gate must run before pair/bin fetch \
                      (health probe only):\nurls={}\nout={}",
                     off.requested_urls,
@@ -2008,13 +1995,15 @@ exit 22
                 assert!(
                     same.requested_urls.lines().any(|u| u.contains("/health")),
                     "{script} same-box must probe {url}/health:\nurls={}\nout={}",
-                    same.requested_urls, same.combined
+                    same.requested_urls,
+                    same.combined
                 );
                 assert!(
                     fetched_past_health(&same.requested_urls),
                     "{script} must continue past the loopback gate when /health \
                      shows the plane is this machine ({url}):\nurls={}\nout={}",
-                    same.requested_urls, same.combined
+                    same.requested_urls,
+                    same.combined
                 );
                 assert!(
                     !same.success,
@@ -2046,12 +2035,14 @@ exit 22
                 assert!(
                     fetched_past_health(&miss.requested_urls),
                     "{script} must not treat reachable {url} as loopback:\nurls={}\nout={}",
-                    miss.requested_urls, miss.combined
+                    miss.requested_urls,
+                    miss.combined
                 );
                 assert!(
                     !miss.requested_urls.lines().any(|u| u.contains("/health")),
                     "{script} must not probe /health for non-loopback {url}:\nurls={}\nout={}",
-                    miss.requested_urls, miss.combined
+                    miss.requested_urls,
+                    miss.combined
                 );
                 assert!(
                     !miss.success,

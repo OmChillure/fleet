@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use super::api::MonitorPatch;
 use super::catalog::InboxAppInfo;
-use super::shared::{csv_list, patch_for, save_filter, PageData};
+use super::shared::{PageData, csv_list, patch_for, save_filter};
 use crate::pages::inbox::experience::experience;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

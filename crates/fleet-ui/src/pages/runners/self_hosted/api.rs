@@ -48,7 +48,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-
 async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
     let first = with_credentials(client().get(api_url(path)))
         .send()

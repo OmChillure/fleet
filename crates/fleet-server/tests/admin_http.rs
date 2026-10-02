@@ -15,7 +15,8 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -613,7 +614,11 @@ async fn admin_runners_lists_hosts_across_workspaces_without_secrets() {
     )
     .await;
     assert_eq!(created.status, StatusCode::OK, "{}", created.body);
-    assert!(created.body["pair_token"].as_str().is_some(), "{}", created.body);
+    assert!(
+        created.body["pair_token"].as_str().is_some(),
+        "{}",
+        created.body
+    );
 
     let listed = call(&app, "GET", "/api/admin/runners", Some(&admin_jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
@@ -632,7 +637,9 @@ async fn admin_runners_lists_hosts_across_workspaces_without_secrets() {
     }
     let runners = listed.body["runners"].as_array().expect("runners");
     assert!(
-        runners.iter().any(|r| r["name"].as_str() == Some("admin-box")),
+        runners
+            .iter()
+            .any(|r| r["name"].as_str() == Some("admin-box")),
         "{}",
         listed.body
     );
@@ -649,7 +656,12 @@ async fn admin_instance_reports_health_without_secrets() {
     assert_eq!(got.body["health"]["db"], "up");
     assert_eq!(got.body["signup_token_required"], false);
     let blob = got.raw;
-    for secret in ["JWT_SECRET", "password_hash", "client_secret", "ADMIN_TOKEN"] {
+    for secret in [
+        "JWT_SECRET",
+        "password_hash",
+        "client_secret",
+        "ADMIN_TOKEN",
+    ] {
         assert!(!blob.contains(secret), "instance leaked {secret}: {blob}");
     }
 }
@@ -666,7 +678,9 @@ async fn admin_work_and_sessions_ok() {
     let sessions = call(&app, "GET", "/api/admin/sessions", Some(&jar), None).await;
     assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
     assert!(
-        sessions.body["sessions"].as_array().is_some_and(|a| !a.is_empty()),
+        sessions.body["sessions"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
         "admin should see own session: {}",
         sessions.body
     );
@@ -688,5 +702,3 @@ async fn admin_workspaces_lists_across_tenants() {
         listed.body
     );
 }
-
-

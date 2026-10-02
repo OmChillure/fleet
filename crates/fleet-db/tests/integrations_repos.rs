@@ -243,14 +243,18 @@ async fn error_row_with_installation_id_is_usable_until_cleared() {
         .expect("proxy lookup")
         .expect("installation error row stays callable");
     assert_eq!(row.status, "error");
-    assert!(integrations::find_connected(&pool, ws_a, "github")
-        .await
-        .expect("find_connected")
-        .is_none());
+    assert!(
+        integrations::find_connected(&pool, ws_a, "github")
+            .await
+            .expect("find_connected")
+            .is_none()
+    );
 
-    assert!(integrations::clear_error(&pool, ws_a, "github")
-        .await
-        .expect("clear_error"));
+    assert!(
+        integrations::clear_error(&pool, ws_a, "github")
+            .await
+            .expect("clear_error")
+    );
     let connected = integrations::find_connected(&pool, ws_a, "github")
         .await
         .expect("find_connected after clear")
@@ -511,11 +515,25 @@ async fn two_named_connections_for_one_provider_stay_separate() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].display_name, "Personal");
 
-    let categories = integrations::list_categories(&pool).await.expect("categories");
-    assert!(categories.iter().any(|c| c.id == "chat" && c.label == "Chat"));
+    let categories = integrations::list_categories(&pool)
+        .await
+        .expect("categories");
+    assert!(
+        categories
+            .iter()
+            .any(|c| c.id == "chat" && c.label == "Chat")
+    );
     let mapped = integrations::list_provider_categories(&pool)
         .await
         .expect("provider categories");
-    assert!(mapped.iter().any(|row| row.provider == "slack" && row.category_id == "chat"));
-    assert!(mapped.iter().any(|row| row.provider == "github" && row.label == "Source control"));
+    assert!(
+        mapped
+            .iter()
+            .any(|row| row.provider == "slack" && row.category_id == "chat")
+    );
+    assert!(
+        mapped
+            .iter()
+            .any(|row| row.provider == "github" && row.label == "Source control")
+    );
 }

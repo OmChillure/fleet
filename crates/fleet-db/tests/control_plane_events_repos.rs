@@ -70,9 +70,9 @@ async fn list_unpublished_returns_inserted_oldest_first() {
         .await
         .expect("list");
     assert!(
-        unpublished.windows(2).all(|w| {
-            (w[0].created_at, w[0].id) <= (w[1].created_at, w[1].id)
-        }),
+        unpublished
+            .windows(2)
+            .all(|w| { (w[0].created_at, w[0].id) <= (w[1].created_at, w[1].id) }),
         "unpublished page must be oldest-first (created_at, then id)"
     );
     // Shared DB may already have ≥1000 unpublished rows; this test's newest
@@ -253,14 +253,10 @@ async fn insert_inbound_published_duplicate_message_id_returns_none() {
     .expect("first inbound")
     .expect("first inbound inserted");
 
-    let second = control_plane_events::insert_inbound_published(
-        &pool,
-        message_id,
-        "sandbox.ready",
-        body,
-    )
-    .await
-    .expect("duplicate inbound must not error");
+    let second =
+        control_plane_events::insert_inbound_published(&pool, message_id, "sandbox.ready", body)
+            .await
+            .expect("duplicate inbound must not error");
     assert!(
         second.is_none(),
         "duplicate inbound message_id is ON CONFLICT DO NOTHING"

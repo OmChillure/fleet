@@ -564,12 +564,34 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                                 bus2.session_started(session_id).await;
                             }
                             let mut chat_result = None;
+                            let mut progress_task = None;
                             let outcome = if signal {
                                 spawn::kill_session(session_id).await
                             } else if chat {
+                                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                                let progress_client = client2.clone();
+                                let progress_lease = claim.lease_token.clone();
+                                progress_task = Some(tokio::spawn(async move {
+                                    while let Some(text) = rx.recv().await {
+                                        if let Err(e) = progress_client
+                                            .note_progress(claim_id, &progress_lease, &text)
+                                            .await
+                                        {
+                                            warn!(
+                                                claim = %claim_id,
+                                                error = %e,
+                                                "chat progress failed"
+                                            );
+                                        }
+                                    }
+                                }));
                                 match tokio::task::spawn_blocking({
                                     let payload = claim.payload.clone();
-                                    move || crate::chat_cli::run_chat_turn(&payload)
+                                    move || {
+                                        crate::chat_cli::run_chat_turn(&payload, &mut |text| {
+                                            let _ = tx.send(text.to_string());
+                                        })
+                                    }
                                 })
                                 .await
                                 {
@@ -627,6 +649,9 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                                 bus2.session_cancelled(session_id).await;
                             } else if !chat {
                                 bus2.session_finished(session_id, ok, err.as_deref()).await;
+                            }
+                            if let Some(task) = progress_task {
+                                let _ = task.await;
                             }
                             if let Err(e) = client2
                                 .complete(

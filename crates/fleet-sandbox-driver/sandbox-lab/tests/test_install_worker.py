@@ -339,13 +339,19 @@ class InstallWorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 linux_man["bins"]["fleet-host"]["version"],
+                self._display_version("fleet-host", "linux-x86_64"),
+            )
+            self.assertEqual(
                 win_man["bins"]["fleet-host.exe"]["version"],
-                "package version is the same on every OS",
+                self._display_version("fleet-host", "windows-x86_64"),
             )
             self.assertEqual(
                 linux_man["bins"]["fleet-driver"]["version"],
+                self._display_version("fleet-driver", "linux-x86_64"),
+            )
+            self.assertEqual(
                 win_man["bins"]["fleet-driver.exe"]["version"],
-                "package version is the same on every OS",
+                self._display_version("fleet-driver", "windows-x86_64"),
             )
 
     def test_stage_write_manifest_stamp_success(self):
@@ -405,21 +411,29 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertNotEqual(man["git_sha"], "")
             self.assertNotEqual(man["git_sha"], "other-tree-id")
 
-    def test_stage_write_manifest_versions_match_runner_packages_toml(self):
-        """bins.*.version equal the [versions] literals in runner-packages.toml."""
-        import json
-        import re
+    def _display_version(self, bin_name: str, platform: str) -> str:
+        """line, or line.rev when that OS rev is not 0."""
+        r = subprocess.run(
+            [
+                "python3",
+                str(REPO / "scripts" / "runner-release.py"),
+                "display-version",
+                bin_name,
+                platform,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
 
-        toml = (REPO / "runner-packages.toml").read_text()
-        versions_m = re.search(r"(?ms)^\[versions\]\s*\n(.*?)(?=^\[|\Z)", toml)
-        self.assertIsNotNone(versions_m, "runner-packages.toml [versions] table")
-        versions = versions_m.group(1)
-        host_m = re.search(r'(?m)^fleet-host\s*=\s*"([^"]+)"', versions)
-        driver_m = re.search(r'(?m)^fleet-driver\s*=\s*"([^"]+)"', versions)
-        self.assertIsNotNone(host_m, "runner-packages.toml [versions] fleet-host")
-        self.assertIsNotNone(driver_m, "runner-packages.toml [versions] fleet-driver")
-        host_ver = host_m.group(1)
-        driver_ver = driver_m.group(1)
+    def test_stage_write_manifest_versions_match_runner_packages_toml(self):
+        """bins.*.version is the display version (line, or line.rev)."""
+        import json
+
+        host_ver = self._display_version("fleet-host", "linux-x86_64")
+        driver_ver = self._display_version("fleet-driver", "linux-x86_64")
 
         with tempfile.TemporaryDirectory() as td:
             linux = Path(td) / "linux-x86_64"
@@ -947,7 +961,11 @@ class InstallWorkerTests(unittest.TestCase):
         for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
             text = (SCRIPT_DIR / name).read_text(encoding="ascii")
             pair_at = text.find("pair --url")
-            start_at = text.find("Start-Process")
+            # Repair starts a process earlier in the file. The install start
+            # is the one after pair.
+            start_at = text.find(
+                'Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe")'
+            )
             self.assertNotEqual(pair_at, -1, name)
             self.assertNotEqual(start_at, -1, name)
             refuse_if = text.find("if ($detected -ne $ThisPlat)")
@@ -1134,8 +1152,6 @@ class InstallWorkerTests(unittest.TestCase):
 
     def test_windows_already_paired_start_process_run(self):
         """windows-*.ps1 already-paired branch starts fleet-host.exe run; stop before download."""
-        import re
-
         for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
             text = (SCRIPT_DIR / name).read_text(encoding="ascii")
             stop_at = text.find("Stop-Process")
@@ -1147,16 +1163,14 @@ class InstallWorkerTests(unittest.TestCase):
                 loop_at,
                 f"{name} must stop fleet-host before replacing the PE",
             )
-            m = re.search(
-                r"elseif\s*\(\s*\$alreadyPaired\s*\)\s*\{(.*?)\n\}",
-                text,
-                re.S,
-            )
-            self.assertIsNotNone(m, f"{name} missing elseif ($alreadyPaired)")
-            self.assertRegex(
-                m.group(1),
-                r"Start-Process[\s\S]*fleet-host\.exe[\s\S]*\brun\b",
-                f"{name} elseif ($alreadyPaired) must Start-Process fleet-host.exe run",
+            marker = "already paired; starting fleet-host so the new bins are what heartbeats"
+            at = text.find(marker)
+            self.assertNotEqual(at, -1, f"{name} missing already-paired install start")
+            window = text[at : at + 400]
+            self.assertIn(
+                'Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run"',
+                window,
+                f"{name} already-paired install must Start-Process fleet-host.exe run",
             )
 
     def _extract_sh_fn(self, src: str, name: str) -> str:
@@ -1187,6 +1201,7 @@ class InstallWorkerTests(unittest.TestCase):
         spies: tuple[str, ...],
         existing_url: str | None = None,
         pair_force: bool = False,
+        pair_rc: int = 0,
     ):
         """Exec _unix_common.sh main with FLEET_PAIR_TOKEN.
 
@@ -1221,6 +1236,9 @@ class InstallWorkerTests(unittest.TestCase):
             host_bin = (
                 "#!/bin/sh\n"
                 f"printf 'fleet-host %s\\n' \"$*\" >> '{events_log}'\n"
+                "case \" $* \" in\n"
+                f"  *' pair '*) exit {int(pair_rc)} ;;\n"
+                "esac\n"
                 "exit 0\n"
             ).encode()
             driver_bin = b"#!/bin/sh\nexit 0\n"
@@ -1502,23 +1520,36 @@ class InstallWorkerTests(unittest.TestCase):
             )
 
     def test_windows_pair_token_branch_start_process_run(self):
-        """windows-*.ps1 if ($pairToken) must Start-Process fleet-host.exe run after pair."""
-        import re
-
+        """windows-*.ps1 pair arm starts fleet-host after pair and after a refused switch."""
         for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
             text = (SCRIPT_DIR / name).read_text(encoding="ascii")
-            m = re.search(
-                r"if\s*\(\s*\$pairToken\s*\)\s*\{([^}]*pair --url[^}]*)\}",
+            at = text.find('$pairArgs = @("pair", "--url"')
+            self.assertNotEqual(at, -1, f"{name} missing pair --url args")
+            tail = text[at : text.find("elseif ($alreadyPaired)", at)]
+            self.assertIn("elseif ($alreadyPaired)", text[at:], name)
+            invoke = tail.find('& (Join-Path $BinDir "fleet-host.exe") @pairArgs')
+            started = tail.find(
+                'Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run"'
+            )
+            self.assertGreater(invoke, -1, name)
+            self.assertGreater(
+                started,
+                invoke,
+                f"{name} must Start-Process fleet-host.exe run after pair",
+            )
+            refuse = tail.find('throw "kept existing pair to $existingUrl"')
+            kept = tail.find('Start-Process -FilePath $keptExe -ArgumentList "run"')
+            self.assertGreater(refuse, -1, name)
+            self.assertGreater(
+                kept,
+                -1,
+                f"{name} refused switch must start fleet-host before throw",
+            )
+            self.assertLess(kept, refuse, name)
+            self.assertIn(
+                "Re-run in a terminal or set FLEET_PAIR_FORCE=1",
                 text,
-                re.S,
-            )
-            self.assertIsNotNone(
-                m, f"{name} missing if ($pairToken) branch that runs pair --url"
-            )
-            self.assertRegex(
-                m.group(1),
-                r"Start-Process[\s\S]*fleet-host\.exe[\s\S]*\brun\b",
-                f"{name} if ($pairToken) must Start-Process fleet-host.exe run",
+                name,
             )
 
     def test_fetch_only_path_installs_freebsd_bins(self):
@@ -2345,6 +2376,33 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, out + "\n" + events)
         self.assertIn("already paired to http://192.168.1.10:18280", out)
         self.assertNotIn("fleet-host pair", events)
+        self.assertIn("stop fleet-host", events, out + "\n" + events)
+        self.assertIn("restart fleet-host", events, out + "\n" + events)
+        self.assertLess(
+            events.find("stop fleet-host"),
+            events.find("restart fleet-host"),
+            out + "\n" + events,
+        )
+
+    def test_unix_pair_failure_restarts_already_paired_host(self):
+        """A failed pair must not leave the stopped unit down."""
+        r, events = self._run_unix_common_pair(
+            platform="linux-x86_64",
+            spies=("systemctl",),
+            existing_url="http://192.168.1.10:18280",
+            pair_force=True,
+            pair_rc=1,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        self.assertNotEqual(r.returncode, 0, out + "\n" + events)
+        self.assertIn("fleet-host pair", events)
+        self.assertIn("--force", events)
+        self.assertIn("pair failed", out)
+        self.assertLess(
+            events.find("fleet-host pair"),
+            events.find("restart fleet-host"),
+            out + "\n" + events,
+        )
 
     def test_all_installers_prompt_on_url_switch(self):
         unix = (SCRIPT_DIR / "_unix_common.sh").read_text()
@@ -2414,7 +2472,9 @@ class VerifyInstallTests(unittest.TestCase):
             proc = self._run(home, bindir)
             self.assertEqual(proc.returncode, 4, proc.stdout + proc.stderr)
             self.assertEqual(self._verdict(proc), "not_installed")
-            self.assertNotIn("flm_", proc.stdout)
+            self.assertIn("token:           missing", proc.stdout)
+            # Help names the flm_ prefix. It must not print a token value.
+            self.assertNotRegex(proc.stdout, r"flm_[0-9A-Za-z]")
 
     def test_config_without_binary_is_bins_missing_and_hides_token(self):
         with tempfile.TemporaryDirectory() as td:

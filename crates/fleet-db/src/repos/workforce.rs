@@ -660,22 +660,18 @@ pub async fn reconcile_goal(
     workspace_id: Uuid,
     goal: &WorkforceGoal,
 ) -> DbResult<WorkforceGoal> {
-    if matches!(
-        goal.status.as_str(),
-        "completed" | "failed" | "cancelled"
-    ) {
+    if matches!(goal.status.as_str(), "completed" | "failed" | "cancelled") {
         return Ok(goal.clone());
     }
 
     if let Some(case_id) = goal.case_id {
-        let st: Option<(String, Option<Uuid>)> = sqlx::query_as(
-            "SELECT status, run_id FROM cases WHERE id = $1 AND workspace_id = $2",
-        )
-        .bind(case_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(map_query_err)?;
+        let st: Option<(String, Option<Uuid>)> =
+            sqlx::query_as("SELECT status, run_id FROM cases WHERE id = $1 AND workspace_id = $2")
+                .bind(case_id)
+                .bind(workspace_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(map_query_err)?;
         if let Some((status, case_run)) = st {
             if let Some(rid) = case_run {
                 if goal.run_id != Some(rid) {
@@ -717,14 +713,10 @@ pub async fn reconcile_goal(
         .await
         .map_err(map_query_err)?;
 
-        let all_success = !tasks.is_empty()
-            && tasks.iter().all(|(s,)| s == "done_success");
-        let any_open = tasks.iter().any(|(s,)| {
-            !matches!(
-                s.as_str(),
-                "done_success" | "done_failed" | "cancelled"
-            )
-        });
+        let all_success = !tasks.is_empty() && tasks.iter().all(|(s,)| s == "done_success");
+        let any_open = tasks
+            .iter()
+            .any(|(s,)| !matches!(s.as_str(), "done_success" | "done_failed" | "cancelled"));
         let run_st = run.as_ref().map(|(s,)| s.as_str()).unwrap_or("");
 
         if all_success {
@@ -758,7 +750,10 @@ pub async fn reconcile_goal(
         .ok_or_else(|| DbError::NotFound("goal vanished during reconcile".into()))
 }
 
-pub async fn reconcile_workspace(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<WorkforceGoal>> {
+pub async fn reconcile_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<WorkforceGoal>> {
     let open = list_open_goals(pool, workspace_id).await?;
     let mut out = Vec::with_capacity(open.len());
     for g in open {

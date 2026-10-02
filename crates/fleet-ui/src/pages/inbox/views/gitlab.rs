@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 use crate::pages::inbox::designer::workflow;
 use crate::pages::inbox::experience::{experience, repo_issue_parts};
 use crate::pages::inbox::shared::{
-    action_cell, empty_or_list, error_banner, flow, frame, header, hook_card, need_connect,
-    open_in, preview, PageData,
+    PageData, action_cell, empty_or_list, error_banner, flow, frame, header, hook_card,
+    need_connect, open_in, preview,
 };
 
 pub fn view(ws: &str, data: PageData) -> Element {

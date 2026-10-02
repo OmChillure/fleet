@@ -1,6 +1,8 @@
 //! Workspace chat — composer with provider + model dropdowns.
 
 use std::sync::Mutex;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::api::{
     ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus, ChatStreamEvent,
@@ -33,6 +35,10 @@ struct PendingFirstSend {
 }
 
 static PENDING_FIRST_SEND: Mutex<Option<PendingFirstSend>> = Mutex::new(None);
+#[cfg(target_arch = "wasm32")]
+static FOLLOW_LATEST: AtomicBool = AtomicBool::new(true);
+#[cfg(target_arch = "wasm32")]
+static IGNORE_SCROLL_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 
 fn stash_pending_first_send(p: PendingFirstSend) {
     if let Ok(mut g) = PENDING_FIRST_SEND.lock() {
@@ -331,6 +337,97 @@ struct ChatMessage {
     created_at: Option<String>,
 }
 
+fn show_in_transcript(msg: &ChatMessage) -> bool {
+    msg.role == MessageRole::User
+        || !msg.content.is_empty()
+        || !msg.actions.is_empty()
+        || msg.latency_ms.is_some()
+}
+
+fn pin_transcript_to_latest() {
+    #[cfg(target_arch = "wasm32")]
+    FOLLOW_LATEST.store(true, Ordering::Relaxed);
+    scroll_transcript_to_latest();
+}
+
+fn scroll_transcript_to_latest() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if !FOLLOW_LATEST.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(el) = transcript_el() else {
+            return;
+        };
+        IGNORE_SCROLL_UNTIL_MS.store(now_ms().saturating_add(120), Ordering::Relaxed);
+        el.set_scroll_top(el.scroll_height());
+    }
+}
+
+fn note_transcript_scroll() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if now_ms() < IGNORE_SCROLL_UNTIL_MS.load(Ordering::Relaxed) {
+            return;
+        }
+        FOLLOW_LATEST.store(transcript_is_near_bottom(), Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn transcript_el() -> Option<web_sys::Element> {
+    web_sys::window()?
+        .document()?
+        .get_element_by_id("chat-transcript")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn transcript_is_near_bottom() -> bool {
+    let Some(el) = transcript_el() else {
+        return true;
+    };
+    el.scroll_height() - el.scroll_top() - el.client_height() < 140
+}
+
+/// `Using run_terminal_command… echo hi · 12s` → name + detail.
+fn running_tool_parts(status: &str) -> Option<(String, String)> {
+    let rest = status.trim().strip_prefix("Using ")?;
+    let (name, after) = rest.split_once('…').unwrap_or((rest, ""));
+    let name = name.trim().trim_end_matches('.').trim();
+    if name.is_empty() {
+        return None;
+    }
+    let detail = after
+        .split('·')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+    Some((name.to_string(), detail))
+}
+
+fn note_live_status(
+    text: &str,
+    mut live_status: Signal<String>,
+    mut live_tools: Signal<Vec<(String, String)>>,
+) {
+    live_status.set(text.to_string());
+    let Some((name, detail)) = running_tool_parts(text) else {
+        return;
+    };
+    let mut tools = live_tools();
+    if tools.last().map(|t| t.0.as_str()) != Some(name.as_str()) {
+        tools.push((name, detail));
+        live_tools.set(tools);
+    } else if !detail.is_empty() && tools.last().map(|t| t.1.as_str()) != Some(detail.as_str()) {
+        if let Some(last) = tools.last_mut() {
+            last.1 = detail;
+        }
+        live_tools.set(tools);
+    }
+}
+
 fn now_ms() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
@@ -404,6 +501,8 @@ fn send_on_existing_session(
     mut sending: Signal<bool>,
     mut draft: Signal<String>,
     mut thread_title: Signal<String>,
+    mut live_status: Signal<String>,
+    mut live_tools: Signal<Vec<(String, String)>>,
 ) {
     let navigator = navigator();
     let first_turn = messages().is_empty();
@@ -418,6 +517,9 @@ fn send_on_existing_session(
     write_stored_runner(&workspace_id, &runner_id);
     write_stored_effort(&workspace_id, &effort);
     write_stored_composer(&workspace_id, &provider, &model);
+    live_status.set(String::new());
+    live_tools.set(Vec::new());
+    pin_transcript_to_latest();
 
     if messages().is_empty() {
         thread_title.set(title_from_text(&text));
@@ -491,13 +593,8 @@ fn send_on_existing_session(
             Some(effort.clone()),
             |ev| match ev {
                 ChatStreamEvent::Status { text } => {
-                    let mut list = messages();
-                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
-                        if last.content.is_empty() || last.content.starts_with('_') {
-                            last.content = format!("_{text}_");
-                        }
-                    }
-                    messages.set(list);
+                    note_live_status(&text, live_status, live_tools);
+                    scroll_transcript_to_latest();
                 }
                 ChatStreamEvent::Delta { text } => {
                     streamed.push_str(&text);
@@ -506,6 +603,7 @@ fn send_on_existing_session(
                         last.content = streamed.clone();
                     }
                     messages.set(list);
+                    scroll_transcript_to_latest();
                 }
                 ChatStreamEvent::Action(action) => {
                     let mut list = messages();
@@ -513,6 +611,7 @@ fn send_on_existing_session(
                         last.actions.push(action);
                     }
                     messages.set(list);
+                    scroll_transcript_to_latest();
                 }
                 ChatStreamEvent::Done(res) => {
                     let mut list = messages();
@@ -594,6 +693,8 @@ fn send_message(
     mut draft: Signal<String>,
     conversation_id: Signal<Option<String>>,
     thread_title: Signal<String>,
+    live_status: Signal<String>,
+    live_tools: Signal<Vec<(String, String)>>,
 ) {
     let navigator = navigator();
     let text = text.trim().to_string();
@@ -619,6 +720,8 @@ fn send_message(
             sending,
             draft,
             thread_title,
+            live_status,
+            live_tools,
         );
         return;
     }
@@ -744,7 +847,19 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
     let mut thread_title = use_signal(|| "New chat".to_string());
     let mut wait_tick = use_signal(|| 0u32);
     let mut send_started_ms = use_signal(|| None::<u64>);
+    let live_status = use_signal(String::new);
+    let live_tools = use_signal(Vec::<(String, String)>::new);
     let navigator = use_navigator();
+
+    // FOLLOW_LATEST is process-wide. A previous thread can leave it unpinned.
+    let mut follow_bootstrapped = use_signal(|| false);
+    use_effect(move || {
+        if follow_bootstrapped() {
+            return;
+        }
+        follow_bootstrapped.set(true);
+        pin_transcript_to_latest();
+    });
 
     use_effect(move || {
         if sending() {
@@ -759,6 +874,19 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
         } else {
             send_started_ms.set(None);
         }
+    });
+
+    use_effect(move || {
+        let msgs = messages();
+        let tail = msgs.last().map(|m| (m.content.len(), m.actions.len()));
+        let _ = (
+            msgs.len(),
+            tail,
+            live_status(),
+            live_tools().len(),
+            sending(),
+        );
+        scroll_transcript_to_latest();
     });
 
     // Run once on mount — do NOT re-subscribe to status signals (that loops forever
@@ -859,6 +987,8 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                 sending,
                 draft,
                 thread_title,
+                live_status,
+                live_tools,
             );
             return;
         }
@@ -1022,6 +1152,14 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             format!("Thinking with {m}…{clock}")
         }
     };
+    let activity_line = {
+        let live = live_status();
+        if live.trim().is_empty() {
+            thinking_label
+        } else {
+            live
+        }
+    };
 
     rsx! {
         div { class: "relative flex h-full min-h-0 w-full flex-col",
@@ -1058,7 +1196,9 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             }
 
             div {
+                id: "chat-transcript",
                 class: "min-h-0 flex-1 overflow-y-auto px-4 pb-36 pt-6 md:px-6",
+                onscroll: move |_| note_transcript_scroll(),
                 if loading_thread() {
                     div { class: "flex h-full items-center justify-center text-sm text-[var(--app-muted)]",
                         "Loading conversation…"
@@ -1102,16 +1242,53 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                 } else {
                     div { class: "mx-auto flex w-full max-w-3xl flex-col gap-6",
                         for msg in messages() {
-                            MessageBubble {
-                                key: "{msg.id}",
-                                message: msg,
-                                workspace_id: workspace_id.clone(),
+                            if show_in_transcript(&msg) {
+                                MessageBubble {
+                                    key: "{msg.id}",
+                                    message: msg,
+                                    workspace_id: workspace_id.clone(),
+                                }
                             }
                         }
                         if sending() {
-                            div { class: "flex items-center gap-2.5 text-sm text-[var(--app-muted)]",
-                                span { class: "chat-thinking-star", "✻" }
-                                span { "{thinking_label}" }
+                            div {
+                                class: "flex flex-col gap-2",
+                                "aria-live": "polite",
+                                if !live_tools().is_empty() {
+                                    div { class: "chat-tool-rail pl-3",
+                                        for (i, (name, detail)) in live_tools().iter().enumerate() {
+                                            {
+                                                let running = i + 1 == live_tools().len()
+                                                    && running_tool_parts(&live_status()).is_some();
+                                                rsx! {
+                                                    div {
+                                                        key: "{i}",
+                                                        class: "mb-2 flex items-start gap-2 text-[13px] leading-5 text-[var(--app-muted)] last:mb-0",
+                                                        span { class: "chat-tool-clock mt-0.5 shrink-0",
+                                                            if running { "✻" } else { "✓" }
+                                                        }
+                                                        div { class: "min-w-0",
+                                                            p { class: "m-0 font-medium text-[var(--app-fg)]",
+                                                                if running {
+                                                                    "Using {name}"
+                                                                } else {
+                                                                    "{name}"
+                                                                }
+                                                            }
+                                                            if !detail.is_empty() {
+                                                                p { class: "m-0 mt-0.5", "{detail}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "flex items-center gap-2.5 text-sm text-[var(--app-muted)]",
+                                    span { class: "chat-thinking-star", "✻" }
+                                    span { "{activity_line}" }
+                                }
                             }
                         }
                     }
@@ -1119,7 +1296,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             }
 
             div {
-                class: "pointer-events-none absolute inset-x-0 bottom-0 px-4 pb-4 pt-2 md:px-6 md:pb-6",
+                class: "pointer-events-none absolute inset-x-0 bottom-0 px-4 pb-1 pt-2 md:px-6 md:pb-2",
                 div { class: "pointer-events-auto mx-auto w-full max-w-3xl",
                     div {
                         class: "rounded-3xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)]",
@@ -1164,6 +1341,8 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                             draft,
                                             conversation_id,
                                             thread_title,
+                                            live_status,
+                                            live_tools,
                                         );
                                     }
                                 }
@@ -1468,6 +1647,8 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                             draft,
                                             conversation_id,
                                             thread_title,
+                                            live_status,
+                                            live_tools,
                                         );
                                     }
                                 },
@@ -1475,9 +1656,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             }
                         }
                     }
-                }
-                p { class: "pointer-events-auto mx-auto mt-1.5 max-w-3xl px-1 text-[10px] leading-4 text-[var(--app-muted)]",
-                    "Grok, Claude, Gemini, OpenAI (Codex), and Private (Ollama) run on the selected runner’s official CLI. A plane API key is a fallback when no runner CLI is logged in."
                 }
             }
         }
@@ -1639,14 +1817,18 @@ fn looks_like_later_copy(s: &str) -> bool {
         || t.contains("say continue")
 }
 
-fn tool_used_label(raw: &str) -> String {
+fn tool_phase_label(raw: &str, running: bool) -> String {
     let t = raw
         .trim()
         .trim_start_matches("Using ")
         .trim_start_matches("using ")
         .trim_end_matches('…')
         .trim_end_matches("...");
-    format!("Used {t}")
+    if running {
+        format!("Using {t}")
+    } else {
+        format!("Used {t}")
+    }
 }
 
 fn clip_live_text(raw: &str) -> Option<String> {
@@ -1797,6 +1979,7 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
                                 .collect(),
                         );
                         err.set(None);
+                        scroll_transcript_to_latest();
                         if is_terminal_run(&st) {
                             break;
                         }
@@ -1852,7 +2035,10 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
                                 }
                                 if is_tool {
                                     div { class: "chat-tool-rail pl-3 text-[13px] text-[var(--app-muted)]",
-                                        span { class: "font-medium text-[var(--app-fg)]", "{tool_used_label(&text)}" }
+                                        span {
+                                            class: "font-medium text-[var(--app-fg)]",
+                                            "{tool_phase_label(&text, !done && i + 1 == activity().len())}"
+                                        }
                                     }
                                 } else if is_think {
                                     p { class: "m-0 text-[15px] leading-6 text-[var(--app-fg)]",
@@ -2099,6 +2285,28 @@ fn ChatBubbleIcon() -> Element {
 #[cfg(test)]
 mod later_copy_tests {
     use super::*;
+
+    #[test]
+    fn running_tool_parts_split_name_and_detail() {
+        assert_eq!(
+            running_tool_parts("Using run_terminal_command… echo fleet-tool-marker · 12s"),
+            Some((
+                "run_terminal_command".into(),
+                "echo fleet-tool-marker".into()
+            ))
+        );
+        assert_eq!(running_tool_parts("Running grok on laptop… 12s"), None);
+        assert_eq!(running_tool_parts("Writing a reply…"), None);
+    }
+
+    #[test]
+    fn tool_phase_label_marks_the_open_step() {
+        assert_eq!(
+            tool_phase_label("read the file", true),
+            "Using read the file"
+        );
+        assert_eq!(tool_phase_label("Using bash…", false), "Used bash");
+    }
 
     #[test]
     fn later_copy_overlay_skips_server_live_status() {

@@ -3,15 +3,15 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    finish_ticket, list_inbox, poll_inbox, update_monitor, InboxResponse, MonitorPatch, TicketRow,
+    InboxResponse, MonitorPatch, TicketRow, finish_ticket, list_inbox, poll_inbox, update_monitor,
 };
-use super::catalog::{explain_error, InboxAppInfo};
+use super::catalog::{InboxAppInfo, explain_error};
 use super::connect::ConnectApp;
 use super::experience::experience;
+use crate::Route;
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
 use crate::pages::integrations::{IntegrationLogo, message_is_auth_failure};
-use crate::Route;
 
 #[derive(Clone, Copy)]
 pub struct PageData {

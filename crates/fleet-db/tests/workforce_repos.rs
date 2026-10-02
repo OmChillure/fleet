@@ -30,9 +30,16 @@ async fn seed_user_with_workspace(pool: &fleet_db::PgPool) -> (Uuid, Uuid) {
     .expect("insert user");
     tx.commit().await.expect("commit user");
     let workspace_id = Uuid::now_v7();
-    workspaces::create_owned(pool, workspace_id, id, &unique_slug("ws"), "Workforce WS", now)
-        .await
-        .expect("create workspace");
+    workspaces::create_owned(
+        pool,
+        workspace_id,
+        id,
+        &unique_slug("ws"),
+        "Workforce WS",
+        now,
+    )
+    .await
+    .expect("create workspace");
     (id, workspace_id)
 }
 
@@ -186,12 +193,19 @@ async fn attach_run_does_not_overwrite_existing_run_id() {
     let attached = workforce::attach_run(&pool, workspace_id, owner.id, inbox_run)
         .await
         .expect("attach");
-    assert!(attached.is_none(), "already-set run_id must not be replaced");
+    assert!(
+        attached.is_none(),
+        "already-set run_id must not be replaced"
+    );
     let owner_now = workforce::get_goal(&pool, workspace_id, owner.id)
         .await
         .expect("reload")
         .expect("owner");
-    assert_eq!(owner_now.run_id, Some(run_a), "attach_run must not overwrite");
+    assert_eq!(
+        owner_now.run_id,
+        Some(run_a),
+        "attach_run must not overwrite"
+    );
 }
 
 #[tokio::test]

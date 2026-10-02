@@ -56,11 +56,7 @@ fn section_value(section: &str, name: &str) -> &'static str {
 }
 
 /// Shipped OS packages locked in `[release.BIN]`. Not musl / armv7 / darwin.
-pub const SHIP_RELEASE_PLATFORMS: &[&str] = &[
-    "linux-x86_64",
-    "linux-aarch64",
-    "windows-x86_64",
-];
+pub const SHIP_RELEASE_PLATFORMS: &[&str] = &["linux-x86_64", "linux-aarch64", "windows-x86_64"];
 
 /// `[release.<bin>].version` — independent of the other binary.
 pub fn release_bin_version(bin: &str) -> &'static str {
@@ -244,8 +240,7 @@ mod tests {
             ("[versions] fleet-driver", fleet_driver_package_version()),
         ] {
             assert_ne!(
-                v,
-                "0.0.0",
+                v, "0.0.0",
                 "{name} must not be the section_value missing-key fallback"
             );
             assert!(

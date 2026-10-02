@@ -4,15 +4,15 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
-use fleet_db::repos::workforce::{self as wf, NewGoal};
-use fleet_db::repos::workspaces as workspace_repo;
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::PgPool;
 use fleet_db::WorkforceGoal;
-use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest, ProxyResult};
+use fleet_db::repos::workforce::{self as wf, NewGoal};
+use fleet_db::repos::workspaces as workspace_repo;
 use fleet_integrations::CredentialsKey;
+use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest, ProxyResult};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -95,7 +95,8 @@ pub async fn gated_invoke_pool(
     let provider = provider.trim().to_ascii_lowercase();
     let operation = operation.trim().to_ascii_lowercase();
     if let Some(kind) = crate::workforce_os::gate_kind(&provider, &operation) {
-        return hold_for_approval(db, workspace_id, caller, kind, &provider, &operation, args).await;
+        return hold_for_approval(db, workspace_id, caller, kind, &provider, &operation, args)
+            .await;
     }
     proxy::invoke(
         db,
@@ -199,13 +200,9 @@ fn held_result(provider: &str, operation: &str, kind: &str, approval_id: Uuid) -
 }
 
 async fn record_event(db: &PgPool, event_type: &str, body: Value) {
-    if let Err(e) = fleet_db::repos::control_plane_events::insert_outbound(
-        db,
-        Uuid::now_v7(),
-        event_type,
-        body,
-    )
-    .await
+    if let Err(e) =
+        fleet_db::repos::control_plane_events::insert_outbound(db, Uuid::now_v7(), event_type, body)
+            .await
     {
         tracing::warn!(%event_type, error = %e, "workforce event was not recorded");
     }
@@ -565,7 +562,12 @@ async fn post_decide_approval(
     })))
 }
 
-async fn release_gate(state: &AppState, workspace_id: Uuid, row: &fleet_db::PolicyApproval, note: &str) {
+async fn release_gate(
+    state: &AppState,
+    workspace_id: Uuid,
+    row: &fleet_db::PolicyApproval,
+    note: &str,
+) {
     if let Some(task_id) = row.task_id {
         let _ = wf::resume_blocked_task(&state.db, workspace_id, task_id, note).await;
     }
@@ -708,10 +710,11 @@ async fn post_intake(
                         }
                         Err(e) => return Err(AppError::internal(e.to_string())),
                     };
-                    let goal = wf::set_goal_status(&state.db, workspace_id, goal.id, "acting", None)
-                        .await
-                        .map_err(|e| AppError::internal(e.to_string()))?
-                        .unwrap_or(goal);
+                    let goal =
+                        wf::set_goal_status(&state.db, workspace_id, goal.id, "acting", None)
+                            .await
+                            .map_err(|e| AppError::internal(e.to_string()))?
+                            .unwrap_or(goal);
                     record_event(
                         &state.db,
                         "workforce.intake_accepted",

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use fleet_db::{connect_and_migrate_with, PgPool, PoolConfig};
+use fleet_db::{PgPool, PoolConfig, connect_and_migrate_with};
 use uuid::Uuid;
 
 pub fn require_database_url() -> String {

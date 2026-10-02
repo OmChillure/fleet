@@ -19,7 +19,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-
 pub async fn get_session_detail(workspace_id: &str, session_id: &str) -> Result<Value, FleetError> {
     let res = with_credentials(client().get(api_url(&worker_session_detail_path(
         workspace_id,

@@ -5,7 +5,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::worker_hosts::{self as host_repo};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
@@ -13,7 +13,7 @@ use fleet_db::{
     WORKER_HOST_ISOLATION_SANDBOXED,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;

@@ -152,15 +152,24 @@ async fn t3_notion_search() {
     assert_eq!(count as usize, items.len(), "count must match items: {out}");
     let item = &items[0];
     assert!(
-        item.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some(),
+        item.get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some(),
         "items[0].id: {out}"
     );
     assert!(
-        item.get("object").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some(),
+        item.get("object")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some(),
         "items[0].object: {out}"
     );
     assert!(
-        item.get("url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some(),
+        item.get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some(),
         "items[0].url: {out}"
     );
     assert!(item.get("title").is_some(), "items[0].title: {out}");

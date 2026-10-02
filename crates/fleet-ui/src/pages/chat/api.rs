@@ -31,7 +31,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-
 async fn authorized_get(path: &str) -> Result<reqwest::Response, ChatError> {
     let first = with_credentials(client().get(api_url(path)))
         .send()
@@ -704,7 +703,10 @@ mod stream_parse_tests {
                 assert!(a.ok);
                 assert_eq!(a.summary, "ran");
                 assert_eq!(a.run_id.as_deref(), Some("run-1"));
-                assert_eq!(a.sandbox_ids.as_deref(), Some(["sb-1".to_string()].as_slice()));
+                assert_eq!(
+                    a.sandbox_ids.as_deref(),
+                    Some(["sb-1".to_string()].as_slice())
+                );
             }
             other => panic!("{other:?}"),
         }

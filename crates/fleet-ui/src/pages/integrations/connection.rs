@@ -3,13 +3,13 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    disconnect_connection, list_integrations, live_connections, oauth_start_url_setup,
-    rename_connection, ConnectionPublic, Integration,
+    ConnectionPublic, Integration, disconnect_connection, list_integrations, live_connections,
+    oauth_start_url_setup, rename_connection,
 };
 use super::logos::IntegrationLogo;
+use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::inbox::is_inbox_app;
-use crate::Route;
 
 fn connection_title(conn: &ConnectionPublic, fallback: &str) -> String {
     let name = conn.display_name.trim();
@@ -34,11 +34,7 @@ pub fn needs_instance_url(provider: &str) -> bool {
 }
 
 #[component]
-pub fn ConnectionEdit(
-    workspace_id: String,
-    provider: String,
-    connection_id: String,
-) -> Element {
+pub fn ConnectionEdit(workspace_id: String, provider: String, connection_id: String) -> Element {
     let route = use_route::<crate::Route>();
     let (workspace_id, provider, connection_id) = match route {
         crate::Route::ConnectionEdit {

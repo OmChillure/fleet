@@ -8,7 +8,7 @@ use super::catalog::INBOX_APPS;
 use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::integrations::{
-    IntegrationLogo, live_connections, load_integrations, IntegrationCategory,
+    IntegrationCategory, IntegrationLogo, live_connections, load_integrations,
 };
 
 #[derive(Clone, PartialEq)]
@@ -69,7 +69,8 @@ pub fn Inbox(workspace_id: String) -> Element {
                         for conn in live_connections(&i) {
                             let failed = conn.status.eq_ignore_ascii_case("error");
                             let on = !failed
-                                && (conn.connected || conn.status.eq_ignore_ascii_case("connected"));
+                                && (conn.connected
+                                    || conn.status.eq_ignore_ascii_case("connected"));
                             if !on && !failed {
                                 continue;
                             }

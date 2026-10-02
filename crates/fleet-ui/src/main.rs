@@ -17,9 +17,9 @@ use fleet_runners_view::routes::{
     SEGMENT_CLOUD, SEGMENT_PARTNERS, runner_child_path, runners_index_target, self_hosted_path,
     workers_redirect,
 };
-use pages::auth::api::UserPublic;
 use pages::admin::Admin;
 use pages::agents::Agents;
+use pages::auth::api::UserPublic;
 use pages::auth::{Login, Signup};
 use pages::cases::{CaseDetail, Cases};
 use pages::chat::{Chat, ChatThread};

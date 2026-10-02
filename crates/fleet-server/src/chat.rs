@@ -21,18 +21,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
-use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::User;
 use fleet_db::WorkerAgentRuntime;
+use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool, execute_tool_with_retry, rewrite_if_asked_to_continue,
-    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, wants_fleet_launch,
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, system_prompt_with_tools,
+    tool_definitions, wants_fleet_launch,
 };
 use crate::state::AppState;
 

@@ -20,9 +20,9 @@ pub mod package_versions;
 pub mod partners;
 pub mod planner;
 pub mod providers;
-pub mod runners;
 pub mod retry;
 pub mod runner_chat;
+pub mod runners;
 pub mod state;
 pub mod tickets;
 pub mod work_io;
@@ -42,12 +42,12 @@ pub use state::AppState;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use fleet_orchestrator::api::router as orch_router;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, TraceLayer};
@@ -293,6 +293,7 @@ pub async fn api_index() -> Json<Value> {
                 "pair": "POST /api/worker-hosts/pair",
                 "heartbeat": "POST /api/worker-hosts/me/heartbeat",
                 "lease": "POST /api/worker-hosts/me/lease",
+                "progress": "POST /api/worker-hosts/me/lease/{claim_id}/progress",
                 "complete": "POST /api/worker-hosts/me/lease/{claim_id}/complete",
                 "install": "GET /install-worker.sh",
             },

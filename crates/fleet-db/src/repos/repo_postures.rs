@@ -40,12 +40,14 @@ pub async fn list_for_workspace(pool: &PgPool, workspace_id: Uuid) -> DbResult<V
     .map_err(map_query_err)?;
     Ok(rows
         .into_iter()
-        .map(|(repo, run_mode, egress_mode, egress_allowlist)| RepoPosture {
-            repo,
-            run_mode,
-            egress_mode,
-            egress_allowlist,
-        })
+        .map(
+            |(repo, run_mode, egress_mode, egress_allowlist)| RepoPosture {
+                repo,
+                run_mode,
+                egress_mode,
+                egress_allowlist,
+            },
+        )
         .collect())
 }
 
@@ -63,12 +65,14 @@ pub async fn get(pool: &PgPool, workspace_id: Uuid, repo: &str) -> DbResult<Opti
     .fetch_optional(pool)
     .await
     .map_err(map_query_err)?;
-    Ok(row.map(|(repo, run_mode, egress_mode, egress_allowlist)| RepoPosture {
-        repo,
-        run_mode,
-        egress_mode,
-        egress_allowlist,
-    }))
+    Ok(row.map(
+        |(repo, run_mode, egress_mode, egress_allowlist)| RepoPosture {
+            repo,
+            run_mode,
+            egress_mode,
+            egress_allowlist,
+        },
+    ))
 }
 
 pub async fn upsert(
@@ -80,9 +84,8 @@ pub async fn upsert(
     egress_allowlist: &str,
 ) -> DbResult<RepoPosture> {
     let repo = normalize_repo(repo)?;
-    let run_mode = parse_worker_host_run_mode(run_mode).ok_or_else(|| {
-        DbError::Conflict("repo run_mode must be on_pc or in_container".into())
-    })?;
+    let run_mode = parse_worker_host_run_mode(run_mode)
+        .ok_or_else(|| DbError::Conflict("repo run_mode must be on_pc or in_container".into()))?;
     let egress_mode = parse_egress_mode(egress_mode).ok_or_else(|| {
         DbError::Conflict("repo egress_mode must be inherit, none, allowlist, or open".into())
     })?;

@@ -346,11 +346,7 @@ fn extract_summary(window: &str) -> Option<String> {
     let close = window[body_at..].find("</p>")?;
     let raw = window[body_at..body_at + close].trim();
     let text = decode_entities(&strip_tags(raw));
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn decode_entities(s: &str) -> String {
@@ -686,8 +682,8 @@ mod tests {
 
     impl NoOutbound {
         fn arm() -> Self {
-            use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
             let before_1234 = tcp_rows_to_port(1234);
             let hits = Arc::new(AtomicU16::new(0));
@@ -844,9 +840,9 @@ mod tests {
         }
 
         const FAIL_CLOSED: Duration = Duration::from_secs(2);
-        let cat = tokio::time::timeout(FAIL_CLOSED, catalog())
-            .await
-            .expect("disabled catalog() must return immediately, not read through cache into a fetch");
+        let cat = tokio::time::timeout(FAIL_CLOSED, catalog()).await.expect(
+            "disabled catalog() must return immediately, not read through cache into a fetch",
+        );
         assert!(
             cat.models.is_empty(),
             "disabled catalog must ignore warm cache, got {} models from {}",
@@ -887,7 +883,9 @@ mod tests {
         const FAIL_CLOSED: Duration = Duration::from_secs(2);
         let tags = tokio::time::timeout(FAIL_CLOSED, tags_for("llama3.2"))
             .await
-            .expect("disabled tags_for() must return immediately, not read through cache into a fetch");
+            .expect(
+                "disabled tags_for() must return immediately, not read through cache into a fetch",
+            );
         assert_eq!(tags.name, "llama3.2");
         assert!(
             tags.tags.is_empty(),

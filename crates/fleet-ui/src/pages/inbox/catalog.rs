@@ -555,9 +555,7 @@ fn humanize_error(provider: &str, raw: &str) -> String {
         || lower.contains("token_revoked")
         || lower.contains("account_inactive")
     {
-        return format!(
-            "The {name} sign-in is no longer valid. Use Reconnect on this page."
-        );
+        return format!("The {name} sign-in is no longer valid. Use Reconnect on this page.");
     }
     if lower.contains("not_connected") {
         return format!("{name} is not connected yet. Use Connect {name} on this page.");

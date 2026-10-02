@@ -89,10 +89,7 @@ fn acquire_run_lock_in(dir: &Path) -> anyhow::Result<RunLock> {
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             let os = std::io::Error::last_os_error();
-            anyhow::bail!(
-                "fleet-host already running (lock {}): {os}",
-                path.display()
-            );
+            anyhow::bail!("fleet-host already running (lock {}): {os}", path.display());
         }
     }
     #[cfg(windows)]
@@ -261,11 +258,7 @@ mod tests {
         let pid_path = lock_dir.join("sleep.pid");
 
         let acquirer = unsafe { libc::fork() };
-        assert!(
-            acquirer >= 0,
-            "fork: {}",
-            std::io::Error::last_os_error()
-        );
+        assert!(acquirer >= 0, "fork: {}", std::io::Error::last_os_error());
         if acquirer == 0 {
             let lock = match acquire_run_lock_in(&lock_dir) {
                 Ok(lock) => lock,

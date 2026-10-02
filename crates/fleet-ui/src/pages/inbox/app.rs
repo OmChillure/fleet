@@ -3,14 +3,14 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{list_inbox, InboxResponse, TicketRow};
+use super::api::{InboxResponse, TicketRow, list_inbox};
 use super::catalog::{explain_error, hook_url_for, inbox_app};
-use super::shared::{apply_rows, PageData};
+use super::shared::{PageData, apply_rows};
 use super::views;
+use crate::Route;
 use crate::pages::integrations::{
     find_integration, list_integrations, live_connections, message_is_auth_failure,
 };
-use crate::Route;
 
 fn filter_value(provider: &str, resp: &InboxResponse) -> String {
     let Some(m) = resp.monitor.as_ref() else {
@@ -31,11 +31,7 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
 }
 
 #[component]
-pub fn InboxConnection(
-    workspace_id: String,
-    provider: String,
-    connection_id: String,
-) -> Element {
+pub fn InboxConnection(workspace_id: String, provider: String, connection_id: String) -> Element {
     let key = format!("{workspace_id}:{provider}:{connection_id}");
     rsx! {
         InboxAppBody {
@@ -189,13 +185,15 @@ fn InboxAppBody(workspace_id: String, provider: String, connection_id: String) -
                     Ok(list) => {
                         if let Some(i) = find_integration(&list, &prov) {
                             let wanted = bound_connection();
-                            let picked = live_connections(i)
-                                .into_iter()
-                                .find(|c| c.id == wanted);
+                            let picked = live_connections(i).into_iter().find(|c| c.id == wanted);
                             if let Some(conn) = picked {
                                 let failed = conn.status.eq_ignore_ascii_case("error");
                                 auth_failed.set(failed);
-                                connected.set(!failed && (conn.connected || conn.status.eq_ignore_ascii_case("connected")));
+                                connected.set(
+                                    !failed
+                                        && (conn.connected
+                                            || conn.status.eq_ignore_ascii_case("connected")),
+                                );
                                 account.set(conn.account_label.clone().unwrap_or_default());
                                 connection_title.set(if conn.display_name.trim().is_empty() {
                                     i.name.clone()
@@ -244,7 +242,8 @@ fn InboxAppBody(workspace_id: String, provider: String, connection_id: String) -
             };
             let failed = conn.status.eq_ignore_ascii_case("error");
             auth_failed.set(failed);
-            connected.set(!failed && (conn.connected || conn.status.eq_ignore_ascii_case("connected")));
+            connected
+                .set(!failed && (conn.connected || conn.status.eq_ignore_ascii_case("connected")));
             account.set(conn.account_label.clone().unwrap_or_default());
             connection_title.set(if conn.display_name.trim().is_empty() {
                 i.name.clone()

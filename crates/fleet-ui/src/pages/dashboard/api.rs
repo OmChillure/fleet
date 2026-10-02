@@ -49,7 +49,6 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct WorkforceSnapshot {
     #[serde(default)]

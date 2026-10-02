@@ -13,13 +13,13 @@ use std::time::{Duration, Instant};
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
-    tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
 };
 use crate::state::AppState;
 
@@ -1275,7 +1275,9 @@ mod tests {
             || {
                 assert_eq!(
                     default_auth_path(),
-                    PathBuf::from("/tmp/fleet-home").join(".grok").join("auth.json")
+                    PathBuf::from("/tmp/fleet-home")
+                        .join(".grok")
+                        .join("auth.json")
                 );
             },
         );
@@ -1316,7 +1318,9 @@ mod tests {
                 || {
                     assert_eq!(
                         GrokConfig::from_env().auth_path,
-                        PathBuf::from("/tmp/fleet-home").join(".grok").join("auth.json")
+                        PathBuf::from("/tmp/fleet-home")
+                            .join(".grok")
+                            .join("auth.json")
                     );
                 },
             );
@@ -1427,7 +1431,9 @@ mod tests {
                     .expect("complete_text without key must fail immediately, not hang");
             let err = text.expect_err("must not call xAI with empty Authorization");
             assert!(
-                !err.to_string().to_ascii_lowercase().contains("cannot reach"),
+                !err.to_string()
+                    .to_ascii_lowercase()
+                    .contains("cannot reach"),
                 "must not send HTTP with empty Authorization: {err}"
             );
         }
@@ -1442,7 +1448,9 @@ mod tests {
             .expect("whitespace-only Grok key must fail immediately, not hang");
         let err = text.expect_err("must not treat whitespace as a Bearer");
         assert!(
-            !err.to_string().to_ascii_lowercase().contains("cannot reach"),
+            !err.to_string()
+                .to_ascii_lowercase()
+                .contains("cannot reach"),
             "must not send HTTP with trimmed-empty Authorization: {err}"
         );
     }
@@ -1503,7 +1511,9 @@ mod tests {
             "expected auth-missing bad_request, got {err}"
         );
         assert!(
-            !err.to_string().to_ascii_lowercase().contains("cannot reach"),
+            !err.to_string()
+                .to_ascii_lowercase()
+                .contains("cannot reach"),
             "must not retry HTTP with empty Authorization: {err}"
         );
     }
